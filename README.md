@@ -8,6 +8,12 @@ Object detection, 3D detection, and pose estimation using center point detection
 
 Contact: [zhouxy2017@gmail.com](mailto:zhouxy2017@gmail.com). Any questions or discussions are welcomed! 
 
+
+# JSZR update
+1. 增加了yolo格式的inference代码，增加了训练的相关配置。
+2. 训练 bash train_keypoints.sh
+3. 测试 bash convert_keypoints_onnx.sh
+
 ## Updates
 
  - (June, 2020) We released a state-of-the-art Lidar-based 3D detection and tracking framework [CenterPoint](https://github.com/tianweiy/CenterPoint).

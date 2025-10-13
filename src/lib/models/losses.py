@@ -174,6 +174,18 @@ class RegWeightedL1Loss(nn.Module):
     loss = loss / (mask.sum() + 1e-4)
     return loss
 
+
+class RegBCEWithLogitsLoss(nn.Module):
+  def __init__(self):
+    super(RegBCEWithLogitsLoss, self).__init__()
+
+  def forward(self, output, mask, ind, target):
+    pred = _transpose_and_gather_feat(output, ind)
+    mask = mask.float()
+    loss = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
+    loss = (loss * mask).sum() / (mask.sum() + 1e-4)
+    return loss
+
 class L1Loss(nn.Module):
   def __init__(self):
     super(L1Loss, self).__init__()

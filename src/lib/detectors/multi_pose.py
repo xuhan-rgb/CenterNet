@@ -25,6 +25,7 @@ class MultiPoseDetector(BaseDetector):
   def __init__(self, opt):
     super(MultiPoseDetector, self).__init__(opt)
     self.flip_idx = opt.flip_idx
+    self._warned_soft_nms_dim = False
 
   def process(self, images, return_time=False):
     with torch.no_grad():
@@ -37,6 +38,7 @@ class MultiPoseDetector(BaseDetector):
       reg = output['reg'] if self.opt.reg_offset else None
       hm_hp = output['hm_hp'] if self.opt.hm_hp else None
       hp_offset = output['hp_offset'] if self.opt.reg_hp_offset else None
+      hp_vis = output.get('hp_vis', None)
       torch.cuda.synchronize()
       forward_time = time.time()
       
@@ -49,10 +51,12 @@ class MultiPoseDetector(BaseDetector):
                 if hm_hp is not None else None
         reg = reg[0:1] if reg is not None else None
         hp_offset = hp_offset[0:1] if hp_offset is not None else None
+        if hp_vis is not None:
+          hp_vis = (hp_vis[0:1] + flip_lr(hp_vis[1:2], self.flip_idx)) / 2
       
       dets = multi_pose_decode(
         output['hm'], output['wh'], output['hps'],
-        reg=reg, hm_hp=hm_hp, hp_offset=hp_offset, K=self.opt.K)
+        reg=reg, hm_hp=hm_hp, hp_offset=hp_offset, hp_vis=hp_vis, K=self.opt.K)
 
     if return_time:
       return output, dets, forward_time
@@ -63,12 +67,17 @@ class MultiPoseDetector(BaseDetector):
     dets = dets.detach().cpu().numpy().reshape(1, -1, dets.shape[2])
     dets = multi_pose_post_process(
       dets.copy(), [meta['c']], [meta['s']],
-      meta['out_height'], meta['out_width'])
+      meta['out_height'], meta['out_width'],
+      num_joints=self.opt.num_joints)
     for j in range(1, self.num_classes + 1):
-      dets[0][j] = np.array(dets[0][j], dtype=np.float32).reshape(-1, 39)
-      # import pdb; pdb.set_trace()
+      if len(dets[0][j]) == 0:
+        continue
+      dets[0][j] = np.array(dets[0][j], dtype=np.float32)
+      dim = dets[0][j].shape[1]
       dets[0][j][:, :4] /= scale
-      dets[0][j][:, 5:] /= scale
+      kp_len = self.opt.num_joints * 2
+      if kp_len > 0 and dim >= 5 + kp_len:
+        dets[0][j][:, 5:5 + kp_len] /= scale
     return dets[0]
 
   def merge_outputs(self, detections):
@@ -76,14 +85,20 @@ class MultiPoseDetector(BaseDetector):
     results[1] = np.concatenate(
         [detection[1] for detection in detections], axis=0).astype(np.float32)
     if self.opt.nms or len(self.opt.test_scales) > 1:
-      soft_nms_39(results[1], Nt=0.5, method=2)
+      if results[1].size > 0 and results[1].shape[1] == 39:
+        soft_nms_39(results[1], Nt=0.5, method=2)
+      elif results[1].size > 0 and not self._warned_soft_nms_dim:
+        print("[multi_pose] skip soft_nms_39: unexpected detection dim {}".format(results[1].shape[1]))
+        self._warned_soft_nms_dim = True
     results[1] = results[1].tolist()
     return results
 
   def debug(self, debugger, images, dets, output, scale=1):
     dets = dets.detach().cpu().numpy().copy()
     dets[:, :, :4] *= self.opt.down_ratio
-    dets[:, :, 5:39] *= self.opt.down_ratio
+    kp_len = self.opt.num_joints * 2
+    if kp_len > 0:
+      dets[:, :, 5:5 + kp_len] *= self.opt.down_ratio
     img = images[0].detach().cpu().numpy().transpose(1, 2, 0)
     img = np.clip(((
       img * self.std + self.mean) * 255.), 0, 255).astype(np.uint8)
@@ -99,5 +114,7 @@ class MultiPoseDetector(BaseDetector):
     for bbox in results[1]:
       if bbox[4] > self.opt.vis_thresh:
         debugger.add_coco_bbox(bbox[:4], 0, bbox[4], img_id='multi_pose')
-        debugger.add_coco_hp(bbox[5:39], img_id='multi_pose')
+        kp_len = self.opt.num_joints * 2
+        if kp_len > 0 and len(bbox) >= 5 + kp_len:
+          debugger.add_coco_hp(bbox[5:5 + kp_len], img_id='multi_pose')
     debugger.show_all_imgs(pause=self.pause)

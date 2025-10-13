@@ -45,6 +45,8 @@ class BaseTrainer(object):
     model_with_loss = self.model_with_loss
     if phase == 'train':
       model_with_loss.train()
+      # 初始化GradScaler
+      scaler = torch.cuda.amp.GradScaler(enabled=getattr(self.opt, 'amp', False))
     else:
       if len(self.opt.gpus) > 1:
         model_with_loss = self.model_with_loss.module
@@ -65,13 +67,23 @@ class BaseTrainer(object):
 
       for k in batch:
         if k != 'meta':
-          batch[k] = batch[k].to(device=opt.device, non_blocking=True)    
-      output, loss, loss_stats = model_with_loss(batch)
-      loss = loss.mean()
-      if phase == 'train':
+          batch[k] = batch[k].to(device=opt.device, non_blocking=True)
+      
+      if phase == 'train' and getattr(opt, 'amp', False):
+        with torch.cuda.amp.autocast():
+          output, loss, loss_stats = model_with_loss(batch)
+        loss = loss.mean()
         self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.step(self.optimizer)
+        scaler.update()
+      else:
+        output, loss, loss_stats = model_with_loss(batch)
+        loss = loss.mean()
+        if phase == 'train':
+          self.optimizer.zero_grad()
+          loss.backward()
+          self.optimizer.step()
       batch_time.update(time.time() - end)
       end = time.time()
 
@@ -93,6 +105,10 @@ class BaseTrainer(object):
       
       if opt.debug > 0:
         self.debug(batch, output, iter_id)
+
+      val_debug_batches = getattr(opt, 'val_debug_batches', 0)
+      if phase == 'val' and val_debug_batches > 0 and iter_id < val_debug_batches:
+        self.save_debug_images(batch, output, iter_id, epoch, phase)
       
       if opt.test:
         self.save_result(output, batch, results)
@@ -101,10 +117,16 @@ class BaseTrainer(object):
     bar.finish()
     ret = {k: v.avg for k, v in avg_loss_stats.items()}
     ret['time'] = bar.elapsed_td.total_seconds() / 60.
+    summary = 'epoch {} {} summary: '.format(epoch, phase) + ' | '.join(
+      '{} {:.4f}'.format(k, v.avg) for k, v in avg_loss_stats.items())
+    print('{}/{} | {}'.format(opt.task, opt.exp_id, summary))
     return ret, results
   
   def debug(self, batch, output, iter_id):
     raise NotImplementedError
+
+  def save_debug_images(self, batch, output, iter_id, epoch, phase):
+    pass
 
   def save_result(self, output, batch, results):
     raise NotImplementedError

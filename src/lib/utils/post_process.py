@@ -100,15 +100,52 @@ def ctdet_post_process(dets, c, s, h, w, num_classes):
   return ret
 
 
-def multi_pose_post_process(dets, c, s, h, w):
-  # dets: batch x max_dets x 40
-  # return list of 39 in image coord
+def multi_pose_post_process(dets, c, s, h, w, num_joints=None):
+  # dets: batch x max_dets x (4 + 1 + 2 * num_joints + opt_vis + 1)
+  # return list where each detection is [bbox(4), score(1), keypoints(2 * num_joints), optional visibility(num_joints)]
   ret = []
-  for i in range(dets.shape[0]):
+  B, max_dets, dim = dets.shape
+  inferred_joints = num_joints
+  if inferred_joints is None:
+    if dim < 6:
+      inferred_joints = 0
+    else:
+      # try to infer assuming optional visibility block may be present
+      remaining = dim - 6
+      if remaining <= 0:
+        inferred_joints = 0
+      elif remaining % 3 == 0:
+        inferred_joints = remaining // 3
+      elif remaining % 2 == 0:
+        inferred_joints = remaining // 2
+      else:
+        # fallback to even part
+        inferred_joints = remaining // 2
+
+  keypoint_len = inferred_joints * 2
+  keypoint_end = 5 + keypoint_len
+  vis_len = 0
+  vis_start = keypoint_end
+  vis_end = vis_start
+  if inferred_joints > 0 and dim >= keypoint_end + inferred_joints + 1:
+    vis_len = inferred_joints
+    vis_end = vis_start + vis_len
+
+  for i in range(B):
     bbox = transform_preds(dets[i, :, :4].reshape(-1, 2), c[i], s[i], (w, h))
-    pts = transform_preds(dets[i, :, 5:39].reshape(-1, 2), c[i], s[i], (w, h))
-    top_preds = np.concatenate(
-      [bbox.reshape(-1, 4), dets[i, :, 4:5], 
-       pts.reshape(-1, 34)], axis=1).astype(np.float32).tolist()
+    bbox = bbox.reshape(-1, 4)
+    score = dets[i, :, 4:5]
+
+    pieces = [bbox, score]
+
+    if inferred_joints > 0 and keypoint_end <= dim:
+      pts = transform_preds(
+        dets[i, :, 5:keypoint_end].reshape(-1, 2), c[i], s[i], (w, h))
+      pts = pts.reshape(-1, keypoint_len)
+      pieces.append(pts)
+    if vis_len > 0 and vis_end <= dim:
+      pieces.append(dets[i, :, vis_start:vis_end])
+
+    top_preds = np.concatenate(pieces, axis=1).astype(np.float32).tolist()
     ret.append({np.ones(1, dtype=np.int32)[0]: top_preds})
   return ret

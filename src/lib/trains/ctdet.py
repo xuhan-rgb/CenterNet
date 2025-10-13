@@ -4,6 +4,7 @@ from __future__ import print_function
 
 import torch
 import numpy as np
+import os
 
 from models.losses import FocalLoss
 from models.losses import RegL1Loss, RegLoss, NormRegL1Loss, RegWeightedL1Loss
@@ -82,6 +83,72 @@ class CtdetTrainer(BaseTrainer):
     loss = CtdetLoss(opt)
     return loss_states, loss
 
+  def save_debug_images(self, batch, output, iter_id, epoch, phase):
+    if phase != 'val':
+      return
+    opt = self.opt
+    reg = output['reg'] if opt.reg_offset else None
+    dets = ctdet_decode(
+      output['hm'], output['wh'], reg=reg,
+      cat_spec_wh=opt.cat_spec_wh, K=opt.K)
+    dets = dets.detach().cpu().numpy().reshape(output['hm'].shape[0], -1, dets.shape[2])
+    dets[:, :, :4] *= opt.down_ratio
+
+    gt_tensor = batch['meta']['gt_det']
+    if isinstance(gt_tensor, torch.Tensor):
+      gt_np = gt_tensor.detach().cpu().numpy()
+    else:
+      gt_np = np.asarray(gt_tensor)
+    gt_np = gt_np.reshape(output['hm'].shape[0], -1, dets.shape[2])
+    gt_np[:, :, :4] *= opt.down_ratio
+
+    save_root = os.path.join(opt.debug_dir, 'epoch_{:03d}'.format(epoch))
+    os.makedirs(save_root, exist_ok=True)
+
+    if isinstance(opt.mean, torch.Tensor):
+      mean = opt.mean.detach().cpu().numpy()
+    else:
+      mean = np.array(opt.mean)
+    if isinstance(opt.std, torch.Tensor):
+      std = opt.std.detach().cpu().numpy()
+    else:
+      std = np.array(opt.std)
+
+    img_ids = batch['meta'].get('img_id', None) if isinstance(batch['meta'], dict) else None
+
+    for i in range(output['hm'].shape[0]):
+      debugger = Debugger(dataset=opt.dataset, theme=opt.debugger_theme,
+                         class_names=getattr(opt, 'class_names', None))
+      img = batch['input'][i].detach().cpu().numpy().transpose(1, 2, 0)
+      img = np.clip(((img * std + mean) * 255.), 0, 255).astype(np.uint8)
+      pred_hm = debugger.gen_colormap(output['hm'][i].detach().cpu().numpy())
+      gt_hm = debugger.gen_colormap(batch['hm'][i].detach().cpu().numpy())
+      debugger.add_blend_img(img, pred_hm, 'pred_hm')
+      debugger.add_blend_img(img, gt_hm, 'gt_hm')
+      debugger.add_img(img, img_id='out_pred')
+      for k in range(len(dets[i])):
+        if dets[i, k, 4] > opt.center_thresh:
+          debugger.add_coco_bbox(dets[i, k, :4], dets[i, k, -1],
+                                 dets[i, k, 4], img_id='out_pred')
+      debugger.add_img(img, img_id='out_gt')
+      for k in range(len(gt_np[i])):
+        if gt_np[i, k, 4] > opt.center_thresh:
+          debugger.add_coco_bbox(gt_np[i, k, :4], gt_np[i, k, -1],
+                                 gt_np[i, k, 4], img_id='out_gt')
+      img_id = i
+      if img_ids is not None:
+        if isinstance(img_ids, torch.Tensor):
+          img_id = int(img_ids[i].item())
+        elif isinstance(img_ids, np.ndarray):
+          img_id = int(img_ids[i])
+        else:
+          try:
+            img_id = int(img_ids[i])
+          except Exception:
+            pass
+      prefix = 'val_{:03d}_{}'.format(iter_id, img_id)
+      debugger.save_all_imgs(save_root, prefix=prefix)
+
   def debug(self, batch, output, iter_id):
     opt = self.opt
     reg = output['reg'] if opt.reg_offset else None
@@ -94,7 +161,8 @@ class CtdetTrainer(BaseTrainer):
     dets_gt[:, :, :4] *= opt.down_ratio
     for i in range(1):
       debugger = Debugger(
-        dataset=opt.dataset, ipynb=(opt.debug==3), theme=opt.debugger_theme)
+        dataset=opt.dataset, ipynb=(opt.debug==3), theme=opt.debugger_theme,
+        class_names=getattr(opt, 'class_names', None))
       img = batch['input'][i].detach().cpu().numpy().transpose(1, 2, 0)
       img = np.clip(((
         img * opt.std + opt.mean) * 255.), 0, 255).astype(np.uint8)
