@@ -33,8 +33,7 @@ COLOR_MAP = {
     "delta": "\033[91m",
 }
 
-FORCED_NUM_CLASSES = 2
-FORCED_CLASS_NAMES = [f"class_{i}" for i in range(FORCED_NUM_CLASSES)]
+DETAIL_LOG_ENABLED = bool(int(os.environ.get("CONVERT_ONNX_DETAIL_LOGS", "0")))
 
 
 def _colorize(msg, color_key=None):
@@ -43,7 +42,21 @@ def _colorize(msg, color_key=None):
     return msg
 
 
+def _normalize_class_names(class_names, num_classes=None):
+    names = list(class_names) if class_names else []
+    if num_classes is None:
+        return names
+    num_classes = max(0, int(num_classes))
+    if len(names) < num_classes:
+        names.extend(f"class_{idx}" for idx in range(len(names), num_classes))
+    else:
+        names = names[:num_classes]
+    return names
+
+
 def log_info(msg, color_key=None):
+    if color_key == "detail" and not DETAIL_LOG_ENABLED:
+        return
     print(_colorize(msg, color_key))
 
 
@@ -64,6 +77,48 @@ def _generate_color_palette(count):
         r, g, b = colorsys.hsv_to_rgb(hue, 0.75, 1.0)
         palette.append((int(r * 255), int(g * 255), int(b * 255)))
     return palette
+
+
+def _bbox_iou(box_a, box_b):
+    """计算两个bbox之间的IoU，bbox格式: [x1, y1, x2, y2]"""
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    inter_area = inter_w * inter_h
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    denom = area_a + area_b - inter_area
+    if denom <= 0.0:
+        return 0.0
+    return inter_area / denom
+
+
+def _apply_cross_class_nms(detections, iou_thresh):
+    """对所有类别的检测结果执行一次统一的NMS"""
+    if iou_thresh is None or iou_thresh <= 0 or len(detections) <= 1:
+        return detections
+
+    detections = sorted(detections, key=lambda d: d.get("confidence", 0.0), reverse=True)
+    keep = []
+    suppressed = [False] * len(detections)
+
+    for i, det in enumerate(detections):
+        if suppressed[i]:
+            continue
+        keep.append(det)
+        bbox_i = det.get("bbox", [0, 0, 0, 0])
+        for j in range(i + 1, len(detections)):
+            if suppressed[j]:
+                continue
+            bbox_j = detections[j].get("bbox", [0, 0, 0, 0])
+            if _bbox_iou(bbox_i, bbox_j) > iou_thresh:
+                suppressed[j] = True
+    return keep
 
 
 def _ensure_directory(path):
@@ -352,6 +407,10 @@ def postprocess_detections(outputs, opt, center, scale):
     if hm is None:
         raise ValueError("ONNX outputs missing 'hm' head")
     hm = torch.sigmoid(hm)
+    num_classes = getattr(opt, "num_classes", None)
+    if num_classes is None or int(num_classes) <= 0:
+        num_classes = hm.shape[1] if hm.dim() >= 3 else 1
+    num_classes = max(1, int(num_classes))
 
     score_thresh = getattr(opt, "vis_thresh", 0.3)
     results = []
@@ -389,7 +448,7 @@ def postprocess_detections(outputs, opt, center, scale):
                 if len(bbox) < 5 or bbox[4] < score_thresh:
                     continue
                 class_id = int(cls_id - 1)
-                class_id = max(0, min(class_id, FORCED_NUM_CLASSES - 1))
+                class_id = max(0, min(class_id, num_classes - 1))
                 results.append(
                     {
                         "bbox": [float(b) for b in bbox[:4]],
@@ -429,6 +488,11 @@ def postprocess_detections(outputs, opt, center, scale):
         # debug prints removed: raw dets shape and samples
         dets = raw_dets.reshape(1, -1, dets.shape[2])
         # debug prints removed: reg/hp_offset shapes
+        log_info(f"[debug] Before post_process: dets.shape={dets.shape}", "detail")
+        log_info(
+            f"[debug] First det before post_process: bbox={dets[0,0,:4]}, score={dets[0,0,4]}, class={dets[0,0,-1]}",
+            "detail",
+        )
         processed = multi_pose_post_process(
             dets.copy(),
             [center],
@@ -437,6 +501,20 @@ def postprocess_detections(outputs, opt, center, scale):
             hm.shape[3],
             getattr(opt, "num_joints", None),
         )
+        log_info(f"[debug] After post_process: type={type(processed)}, len={len(processed)}", "detail")
+        if len(processed) > 0:
+            log_info(f"[debug] processed[0] keys: {list(processed[0].keys())}", "detail")
+            for cls_id, entries in processed[0].items():
+                log_info(f"[debug] class {cls_id}: {len(entries)} entries", "detail")
+                if len(entries) > 0:
+                    first_entry = entries[0]
+                    log_info(f"[debug]   first entry: len={len(first_entry)}", "detail")
+                    log_info(f"[debug]   first entry bbox: {first_entry[:4]}", "detail")
+                    log_info(f"[debug]   first entry score at [4]: {first_entry[4]}", "detail")
+                    if len(first_entry) > 24:
+                        log_info(f"[debug]   first entry vis at [24]: {first_entry[24]}", "detail")
+                    if len(first_entry) > 25:
+                        log_info(f"[debug]   first entry values [24-28]: {first_entry[24:28]}", "detail")
 
         # 对initial_kps也进行坐标变换
         num_joints = getattr(opt, "num_joints", 0)
@@ -454,6 +532,12 @@ def postprocess_detections(outputs, opt, center, scale):
         entry_counter = 0
         for cls_id, entries in processed[0].items():
             for entry_idx, entry in enumerate(entries):
+                # 打印所有候选检测的得分，包括被过滤的
+                if len(entry) >= 5:
+                    log_info(
+                        f"[filter] entry {entry_idx}: score={entry[4]:.4f}, thresh={score_thresh:.4f}, keep={entry[4] >= score_thresh}",
+                        "detail",
+                    )
                 if len(entry) < 5 or entry[4] < score_thresh:
                     continue
                 bbox = [float(b) for b in entry[:4]]
@@ -495,7 +579,7 @@ def postprocess_detections(outputs, opt, center, scale):
                     )
                 # debug prints removed: det summary, keypoints and offsets
                 class_id = int(cls_id - 1)
-                class_id = max(0, min(class_id, FORCED_NUM_CLASSES - 1))
+                class_id = max(0, min(class_id, num_classes - 1))
                 result_dict = {
                     "bbox": bbox,
                     "confidence": float(entry[4]),
@@ -511,6 +595,16 @@ def postprocess_detections(outputs, opt, center, scale):
     else:
         raise ValueError(f"Unsupported task '{opt.task}' for post-processing")
 
+    cross_nms_thresh = getattr(opt, "cross_class_nms_thresh", -1.0)
+    if cross_nms_thresh and cross_nms_thresh > 0:
+        before_count = len(results)
+        results = _apply_cross_class_nms(results, cross_nms_thresh)
+        after_count = len(results)
+        log_info(
+            f"[cross-nms] merged detections across classes with IoU>{cross_nms_thresh:.2f}: {before_count} -> {after_count}",
+            "detail",
+        )
+
     results.sort(key=lambda x: x["confidence"], reverse=True)
     return results[:50]
 
@@ -521,13 +615,18 @@ def visualize_detections(image, detections, class_names=None, save_path=None, ke
 
     vis_img = image.copy()
 
-    # 统一类别显示
+    max_cls_id = max((int(det.get("class_id", -1)) for det in detections), default=-1)
+    inferred_num = max_cls_id + 1 if max_cls_id >= 0 else 0
+
     if class_names:
-        class_names = list(class_names)[:FORCED_NUM_CLASSES]
-        if len(class_names) < FORCED_NUM_CLASSES:
-            class_names += [f"class_{idx}" for idx in range(len(class_names), FORCED_NUM_CLASSES)]
+        class_names = _normalize_class_names(class_names, max(inferred_num, len(class_names)))
     else:
-        class_names = FORCED_CLASS_NAMES
+        target_num = inferred_num if inferred_num > 0 else 0
+        if target_num <= 0:
+            target_num = 1
+        class_names = [f"class_{idx}" for idx in range(target_num)]
+
+    num_classes = len(class_names)
 
     # 预定义颜色
     colors = [
@@ -552,7 +651,10 @@ def visualize_detections(image, detections, class_names=None, save_path=None, ke
     for i, det in enumerate(detections):
         x1, y1, x2, y2 = [int(v) for v in det["bbox"]]
         class_id = int(det.get("class_id", 0))
-        class_id = max(0, min(class_id, FORCED_NUM_CLASSES - 1))
+        if num_classes > 0:
+            class_id = max(0, min(class_id, num_classes - 1))
+        else:
+            class_id = max(0, class_id)
         det["class_id"] = class_id
         conf = det["confidence"]
         # 应用sigmoid变换得分
@@ -587,7 +689,6 @@ def visualize_detections(image, detections, class_names=None, save_path=None, ke
             if initial_keypoints:
                 initial_keypoints = initial_keypoints[:max_kps]
             visibilities_raw = det.get("keypoint_visibility")
-            log_info(f"[vis debug] det #{i} raw visibilities: {visibilities_raw}", "detail")
             visibilities = []
             if visibilities_raw is not None:
                 try:
@@ -597,7 +698,6 @@ def visualize_detections(image, detections, class_names=None, save_path=None, ke
                 visibilities = [float(v) for v in arr[:max_kps]]
             if len(visibilities) < max_kps:
                 visibilities.extend([None] * (max_kps - len(visibilities)))
-            log_info(f"[vis debug] det #{i} parsed visibilities: {visibilities}", "detail")
             for idx, (kp_x, kp_y) in enumerate(keypoints):
                 vis_flag = visibilities[idx] if idx < len(visibilities) else None
                 if vis_flag is not None:
@@ -644,7 +744,8 @@ def visualize_detections(image, detections, class_names=None, save_path=None, ke
 
                 if vis_flag is not None:
                     vis_label = 1 if vis_flag > 0.5 else 0
-                    text = f"{idx}:{vis_label}"
+                    # 显示原始概率值而不是二值化结果
+                    text = f"{idx}:{vis_flag:.2f}"
 
                     text_size, baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
                     img_h, img_w = vis_img.shape[:2]
@@ -757,10 +858,8 @@ def visualize_and_save_heatmaps(
             label_name = class_names[cls_idx]
         elif class_names:
             label_name = class_names[-1]
-        elif max_maps == FORCED_NUM_CLASSES:
-            label_name = FORCED_CLASS_NAMES[min(cls_idx, FORCED_NUM_CLASSES - 1)]
         else:
-            label_name = f"Class_{cls_idx}"
+            label_name = f"class_{cls_idx}"
 
         panels.append((heatmap_norm, label_name, max_val))
         saved_heatmaps.append(
@@ -824,7 +923,7 @@ def visualize_and_save_heatmaps(
     return saved_heatmaps
 
 
-def load_yolo_ground_truth(label_path, original_size, num_joints):
+def load_yolo_ground_truth(label_path, original_size, num_joints, num_classes=None):
     gt = []
     width, height = original_size
     if not os.path.exists(label_path):
@@ -842,7 +941,9 @@ def load_yolo_ground_truth(label_path, original_size, num_joints):
         if len(parts) < 5:
             continue
         cls_id = int(float(parts[0]))
-        cls_id = max(0, min(cls_id, FORCED_NUM_CLASSES - 1))
+        cls_id = max(0, cls_id)
+        if num_classes is not None and num_classes > 0:
+            cls_id = min(cls_id, num_classes - 1)
         xc, yc, w, h = map(float, parts[1:5])
         xc *= width
         yc *= height
@@ -996,9 +1097,15 @@ def test_image_inference(pytorch_model, opt):
     output_names = [output.name for output in ort_session.get_outputs()]
 
     # 获取类别名称
-    class_names = None
-    if opt.dataset == "coco":
-        class_names = [
+    opt_num_classes = getattr(opt, "num_classes", None)
+    if opt_num_classes is not None and int(opt_num_classes) <= 0:
+        opt_num_classes = None
+
+    base_names = getattr(opt, "class_names", None)
+    if base_names:
+        class_names = _normalize_class_names(base_names, opt_num_classes)
+    elif opt.dataset == "coco":
+        coco_names = [
             "person",
             "bicycle",
             "car",
@@ -1080,12 +1187,11 @@ def test_image_inference(pytorch_model, opt):
             "hair drier",
             "toothbrush",
         ]
-    if class_names:
-        class_names = list(class_names)[:FORCED_NUM_CLASSES]
-        if len(class_names) < FORCED_NUM_CLASSES:
-            class_names += [f"class_{idx}" for idx in range(len(class_names), FORCED_NUM_CLASSES)]
+        class_names = _normalize_class_names(coco_names, opt_num_classes)
+    elif opt_num_classes:
+        class_names = [f"class_{idx}" for idx in range(int(opt_num_classes))]
     else:
-        class_names = FORCED_CLASS_NAMES
+        class_names = None
 
     # 预处理图像
     log_info("Preprocessing image...")
@@ -1159,15 +1265,17 @@ def test_image_inference(pytorch_model, opt):
             background=None,
             center=None,
             scale=None,
-            max_maps=FORCED_NUM_CLASSES,
+            max_maps=None,
         )
         print("========> 没有加sigmoid之前的最大值", heatmaps.shape, heatmaps.max())
         log_info(f"Saved heatmap visualizations: {len(saved_heatmaps)}")
 
         if opt.task == "multi_pose" and "hm_hp" in head_names:
+            print("===================1")
             hm_hp_idx = head_names.index("hm_hp")
             kp_heatmaps = ort_outputs[hm_hp_idx]
             if kp_heatmaps is not None:
+                print("===================kp_heatmaps.shape: ", kp_heatmaps.shape)
                 num_joints = kp_heatmaps.shape[1] if kp_heatmaps.ndim == 4 else kp_heatmaps.shape[0]
                 kp_names = [f"joint_{i}" for i in range(num_joints)]
                 kp_saved = visualize_and_save_heatmaps(
@@ -1189,7 +1297,12 @@ def test_image_inference(pytorch_model, opt):
     save_onnx_io_dump(image_base_name, input_tensor, output_names, ort_outputs, detections)
 
     if opt.test_label:
-        gt_entries = load_yolo_ground_truth(opt.test_label, original_size, getattr(opt, "num_joints", 0))
+        gt_entries = load_yolo_ground_truth(
+            opt.test_label,
+            original_size,
+            getattr(opt, "num_joints", 0),
+            getattr(opt, "num_classes", None),
+        )
         log_info(f"[ground_truth] entries loaded: path={opt.test_label}, count={len(gt_entries)}")
         for idx, gt in enumerate(gt_entries):
             log_info(
@@ -1236,7 +1349,20 @@ def test_image_inference(pytorch_model, opt):
                 "pred",
             )
             if det.get("keypoints"):
-                log_info(f"    keypoints: {det['keypoints']}", "pred")
+                kp_vis = det.get("keypoint_visibility", [])
+                if kp_vis:
+                    # 格式化输出: 坐标 + 可见性
+                    kp_with_vis = [
+                        (
+                            f"({kp[0]:.1f}, {kp[1]:.1f}, vis={kp_vis[i]:.2f})"
+                            if i < len(kp_vis)
+                            else f"({kp[0]:.1f}, {kp[1]:.1f})"
+                        )
+                        for i, kp in enumerate(det["keypoints"])
+                    ]
+                    log_info(f"    keypoints: {kp_with_vis}", "pred")
+                else:
+                    log_info(f"    keypoints: {det['keypoints']}", "pred")
             if opt.test_label and det.get("keypoints"):
                 _log_prediction_vs_gt(det, gt_entries)
     else:

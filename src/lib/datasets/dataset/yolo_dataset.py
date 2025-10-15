@@ -65,8 +65,11 @@ def _infer_keypoint_config(dataset_dir):
 
 import torch.utils.data as data
 
-_FORCED_NUM_CLASSES = 2
-_DEFAULT_YOLO_CLASSES = ["class_{}".format(i) for i in range(_FORCED_NUM_CLASSES)]
+_FORCED_NUM_CLASSES = 22
+
+
+def _default_class_names(count):
+    return ["class_{}".format(i) for i in range(count)]
 
 
 _DEFAULT_COCO_CLASSES = [
@@ -154,35 +157,39 @@ _DEFAULT_COCO_CLASSES = [
 
 
 def _resolve_dataset_dir(opt):
+    override_dir = getattr(opt, "yolo_dataset_dir", "")
+    if override_dir:
+        return Path(override_dir).expanduser()
     data_dir = getattr(opt, "data_dir", None)
     if data_dir:
         base = Path(data_dir)
     else:
         base = Path(__file__).resolve().parents[4] / "data"
-    return base / "yolo_dataset"
+    return base / "yolo_annotations"
 
 
-def _load_class_names(dataset_dir):
+def _load_class_names(dataset_dir, forced_num_classes):
+    target_classes = forced_num_classes if forced_num_classes and forced_num_classes > 0 else _FORCED_NUM_CLASSES
     class_file = dataset_dir / "classes.txt"
     if class_file.exists():
         names = [line.strip() for line in class_file.read_text().splitlines() if line.strip()]
         if names:
-            names = names[:_FORCED_NUM_CLASSES]
-            while len(names) < _FORCED_NUM_CLASSES:
+            names = names[:target_classes]
+            while len(names) < target_classes:
                 names.append("class_{}".format(len(names)))
             return names
 
-    inferred_classes = _infer_num_classes(dataset_dir)
+    inferred_classes = _infer_num_classes(dataset_dir, target_classes)
     if inferred_classes > 0:
-        names = ["class_{}".format(i) for i in range(min(inferred_classes, _FORCED_NUM_CLASSES))]
-        while len(names) < _FORCED_NUM_CLASSES:
+        names = ["class_{}".format(i) for i in range(min(inferred_classes, target_classes))]
+        while len(names) < target_classes:
             names.append("class_{}".format(len(names)))
-        return names
+        return names[:target_classes]
 
-    return list(_DEFAULT_YOLO_CLASSES)
+    return _default_class_names(target_classes)
 
 
-def _infer_num_classes(dataset_dir):
+def _infer_num_classes(dataset_dir, forced_num_classes=None):
     label_root = Path(dataset_dir) / "labels"
     if not label_root.exists():
         return 0
@@ -205,10 +212,14 @@ def _infer_num_classes(dataset_dir):
                         if cls_id > max_class:
                             max_class = cls_id
                 if max_class >= 1:
-                    return min(max_class + 1, _FORCED_NUM_CLASSES)
+                    limit = forced_num_classes if forced_num_classes and forced_num_classes > 0 else _FORCED_NUM_CLASSES
+                    return min(max_class + 1, limit)
             except OSError:
                 continue
-    return max_class + 1 if max_class >= 0 else 0
+    total = max_class + 1 if max_class >= 0 else 0
+    if forced_num_classes and forced_num_classes > 0 and total > forced_num_classes:
+        return forced_num_classes
+    return total
 
 
 def _parse_mean_std_override(raw_value, flag_name):
@@ -226,7 +237,9 @@ def _parse_mean_std_override(raw_value, flag_name):
         try:
             arr = np.asarray(raw_value, dtype=np.float32).reshape(-1)
         except Exception as exc:
-            raise ValueError("{} expects an iterable with three numeric values but got {!r}".format(flag_name, raw_value)) from exc
+            raise ValueError(
+                "{} expects an iterable with three numeric values but got {!r}".format(flag_name, raw_value)
+            ) from exc
         values = [float(v) for v in arr.tolist()]
     if len(values) == 0:
         return None
@@ -244,7 +257,8 @@ class YOLODataset(data.Dataset):
     @classmethod
     def get_dataset_spec(cls, opt):
         dataset_dir = _resolve_dataset_dir(opt)
-        class_names = _load_class_names(dataset_dir)
+        forced_num_classes = getattr(opt, "yolo_force_num_classes", -1)
+        class_names = _load_class_names(dataset_dir, forced_num_classes)
         cls.num_classes = len(class_names)
 
         requested_kpts = getattr(opt, "yolo_num_kpts", -1)
@@ -345,6 +359,17 @@ class YOLODataset(data.Dataset):
 
         # Create images list as expected by CTDet (image IDs)
         self.images = list(range(len(self.image_info)))
+        repeat_factor = getattr(opt, "yolo_repeat_factor", 1)
+        if self.split == "train" and repeat_factor and repeat_factor > 1:
+            base_indices = self.images.copy()
+            repeated = []
+            rng = np.random.RandomState(123)
+            for _ in range(repeat_factor):
+                shuffled = base_indices.copy()
+                rng.shuffle(shuffled)
+                repeated.extend(shuffled)
+            self.images = repeated
+            print(f"[yolo_dataset] train split repeated {repeat_factor}x -> {len(self.images)} samples per epoch")
 
         # For compatibility with COCO-based code
         self.coco = self
@@ -362,6 +387,8 @@ class YOLODataset(data.Dataset):
             img_files.extend(glob.glob(os.path.join(self.img_dir, ext.upper())))
 
         img_files = sorted(img_files)
+
+        sample_debug = bool(getattr(self.opt, "log_sample_details", False))
 
         for img_path in img_files:
             # Get corresponding label file
@@ -382,11 +409,11 @@ class YOLODataset(data.Dataset):
                     lines = f.readlines()
 
                 for line in lines:
-                    line = line.strip()
-                    if not line:
+                    raw_line = line.strip()
+                    if not raw_line:
                         continue
 
-                    parts = line.split()
+                    parts = raw_line.split()
                     expected_len = 5 + (self.num_joints * self.keypoint_components if self._has_keypoints else 0)
 
                     if float(parts[0]) == -1:
@@ -425,6 +452,26 @@ class YOLODataset(data.Dataset):
                     y1 = max(0, min(y1, height))
                     x2 = max(0, min(x2, width))
                     y2 = max(0, min(y2, height))
+
+                    if sample_debug:
+                        cls_name = self.class_names[class_id] if class_id < len(self.class_names) else f"class_{class_id}"
+                        print(
+                            "[yolo_dataset] split={} img={} label={} cls={} ({}) bbox_xyxy=({:.1f}, {:.1f}, {:.1f}, {:.1f}) "
+                            "bbox_wh=({:.1f}, {:.1f}) yolo_line={}".format(
+                                self.split,
+                                img_name,
+                                os.path.basename(label_path),
+                                class_id,
+                                cls_name,
+                                x1,
+                                y1,
+                                x2,
+                                y2,
+                                x2 - x1,
+                                y2 - y1,
+                                raw_line,
+                            )
+                        )
 
                     if x2 > x1 and y2 > y1:  # Valid bounding box
                         ann = {

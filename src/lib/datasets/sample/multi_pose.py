@@ -28,7 +28,6 @@ class MultiPoseDataset(data.Dataset):
         return border // i
 
     def __getitem__(self, index):
-        index = 0
 
         import time
 
@@ -115,18 +114,27 @@ class MultiPoseDataset(data.Dataset):
 
         debug_keypoints = [] if debug_aug_vis and num_joints > 0 else None
         gt_det = []
+        keep_bbox_without_kpts = bool(getattr(self.opt, "keep_bbox_without_kpts", False))
         for k in range(num_objs):
             ann = anns[k]
             raw_bbox_xywh = np.array(ann["bbox"], dtype=np.float32)
             bbox = self._coco_box_to_bbox(raw_bbox_xywh)
             cls_id = int(ann["category_id"]) - 1
+            cls_name = (
+                self.class_names[cls_id]
+                if isinstance(getattr(self, "class_names", None), list) and 0 <= cls_id < len(self.class_names)
+                else f"class_{cls_id}"
+            )
             pts = np.array(ann["keypoints"], np.float32).reshape(num_joints, 3)
             pts_for_input = pts.copy() if debug_keypoints is not None else None
             if sample_debug and k == 0 and num_joints > 0:
                 first_joint = pts[0]
                 print(
-                    "[multi_pose sample] {} label bbox_xywh=({:.2f}, {:.2f}, {:.2f}, {:.2f}), first_joint=({:.2f}, {:.2f}), vis={:.1f}".format(
+                    "[multi_pose sample] {} img={} label cls={} ({}) bbox_xywh=({:.2f}, {:.2f}, {:.2f}, {:.2f}), first_joint=({:.2f}, {:.2f}), vis={:.1f}".format(
                         item_tag,
+                        file_name,
+                        cls_id,
+                        cls_name,
                         raw_bbox_xywh[0],
                         raw_bbox_xywh[1],
                         raw_bbox_xywh[2],
@@ -182,69 +190,134 @@ class MultiPoseDataset(data.Dataset):
                 reg_mask[k] = 1
                 visible_before_aug = np.sum(pts[:, 2] > 0)
                 if visible_before_aug == 0:
-                    hm[cls_id, ct_int[1], ct_int[0]] = 0.9999
-                    reg_mask[k] = 0
+                    hm[cls_id, ct_int[1], ct_int[0]] = max(hm[cls_id, ct_int[1], ct_int[0]], 0.9999)
+                    if not keep_bbox_without_kpts:
+                        reg_mask[k] = 0
 
                 hp_radius = gaussian_radius((math.ceil(h), math.ceil(w)))
                 hp_radius = max(0, int(hp_radius))
                 if self.opt.hm_gauss > 0:
                     hp_radius = max(0, int(round(self.opt.hm_gauss)))
                 visible_after_aug = 0
+                learn_invisible = getattr(self.opt, "learn_invisible_kpts", False)
+                learn_truncated = getattr(self.opt, "learn_truncated_kpts", False)
                 for j in range(num_joints):
-                    hp_vis_mask[k, j] = 1.0
                     debug_entry = None
                     if debug_keypoints is not None and pts_for_input is not None and j < pts_for_input.shape[0]:
                         kp_inp = affine_transform(pts_for_input[j, :2], trans_input)
                         debug_entry = [float(kp_inp[0]), float(kp_inp[1]), float(pts[j, 2]), int(j)]
-                    if pts[j, 2] > 0:
-                        pts[j, :2] = affine_transform(pts[j, :2], trans_output_rot)
-                        if 0 <= pts[j, 0] < output_res and 0 <= pts[j, 1] < output_res:
-                            visible_after_aug += 1
-                            kps[k, j * 2 : j * 2 + 2] = pts[j, :2] - ct_int
-                            kps_mask[k, j * 2 : j * 2 + 2] = 1
-                            pt_int = pts[j, :2].astype(np.int32)
 
-                            hp_offset[k * num_joints + j] = pts[j, :2] - pt_int
-                            hp_ind[k * num_joints + j] = pt_int[1] * output_res + pt_int[0]
-                            hp_mask[k * num_joints + j] = 1
-                            if sample_debug and k == 0 and j == 0:
-                                print(
-                                    "[multi_pose sample] {} first joint after affine=({:.4f}, {:.4f}), "
-                                    "center_int=({:.4f}, {:.4f}), offset=({:.4f}, {:.4f})".format(
-                                        item_tag,
-                                        pts[j, 0],
-                                        pts[j, 1],
-                                        ct_int[0],
-                                        ct_int[1],
-                                        pts[j, 0] - ct_int[0],
-                                        pts[j, 1] - ct_int[1],
+                    # 跳过属性为-1的关键点（不参与任何损失计算，包括可见性损失）
+                    if pts[j, 2] < 0:
+                        pts[j, 2] = 0  # 标记为不可见
+                        hp_vis[k, j] = 0.0
+                        hp_vis_mask[k, j] = 0.0  # 不参与可见性损失计算
+                        if debug_entry is not None:
+                            debug_entry[2] = float(pts[j, 2])
+                            debug_keypoints.append(debug_entry)
+                        continue
+
+                    # 对于有效的关键点，设置可见性mask为1
+                    hp_vis_mask[k, j] = 1.0
+
+                    # 对于不可见的关键点，如果启用learn_invisible_kpts，也进行变换
+                    kp_is_visible = pts[j, 2] > 0
+                    if kp_is_visible or learn_invisible:
+                        pts[j, :2] = affine_transform(pts[j, :2], trans_output_rot)
+
+                        # 检查是否在边界内
+                        is_in_bounds = 0 <= pts[j, 0] < output_res and 0 <= pts[j, 1] < output_res
+
+                        if is_in_bounds:
+                            # 在边界内的点
+                            if kp_is_visible:
+                                visible_after_aug += 1
+
+                            # 对于不可见的点，如果learn_invisible启用，也设置mask和offset
+                            if kp_is_visible or learn_invisible:
+                                kps[k, j * 2 : j * 2 + 2] = pts[j, :2] - ct_int
+                                kps_mask[k, j * 2 : j * 2 + 2] = 1
+                                pt_int = pts[j, :2].astype(np.int32)
+
+                                hp_offset[k * num_joints + j] = pts[j, :2] - pt_int
+                                hp_ind[k * num_joints + j] = pt_int[1] * output_res + pt_int[0]
+                                hp_mask[k * num_joints + j] = 1
+                                if sample_debug and k == 0 and j == 0:
+                                    print(
+                                        "[multi_pose sample] {} first joint after affine=({:.4f}, {:.4f}), "
+                                        "center_int=({:.4f}, {:.4f}), offset=({:.4f}, {:.4f}), vis={:.1f}, in_bounds=True".format(
+                                            item_tag,
+                                            pts[j, 0],
+                                            pts[j, 1],
+                                            ct_int[0],
+                                            ct_int[1],
+                                            pts[j, 0] - ct_int[0],
+                                            pts[j, 1] - ct_int[1],
+                                            pts[j, 2],
+                                        )
                                     )
-                                )
-                                print(
-                                    "[multi_pose sample] {} first hp_offset=({:.4f}, {:.4f}), hp_ind={}, hp_mask={}".format(
-                                        item_tag,
-                                        hp_offset[k * num_joints + j, 0],
-                                        hp_offset[k * num_joints + j, 1],
-                                        int(hp_ind[k * num_joints + j]),
-                                        int(hp_mask[k * num_joints + j]),
+                                    print(
+                                        "[multi_pose sample] {} first hp_offset=({:.4f}, {:.4f}), hp_ind={}, hp_mask={}".format(
+                                            item_tag,
+                                            hp_offset[k * num_joints + j, 0],
+                                            hp_offset[k * num_joints + j, 1],
+                                            int(hp_ind[k * num_joints + j]),
+                                            int(hp_mask[k * num_joints + j]),
+                                        )
                                     )
-                                )
-                            if self.opt.dense_hp:
-                                # must be before draw center hm gaussian
-                                draw_dense_reg(
-                                    dense_kps[j], hm[cls_id], ct_int, pts[j, :2] - ct_int, radius, is_offset=True
-                                )
-                                draw_gaussian(dense_kps_mask[j], ct_int, radius)
-                            draw_gaussian(hm_hp[j], pt_int, hp_radius)
+                                if self.opt.dense_hp:
+                                    # must be before draw center hm gaussian
+                                    draw_dense_reg(
+                                        dense_kps[j], hm[cls_id], ct_int, pts[j, :2] - ct_int, radius, is_offset=True
+                                    )
+                                    draw_gaussian(dense_kps_mask[j], ct_int, radius)
+
+                                # 对于可见的点或者启用learn_invisible的不可见点，都绘制heatmap
+                                if kp_is_visible or learn_invisible:
+                                    draw_gaussian(hm_hp[j], pt_int, hp_radius)
                         else:
+                            # 超出边界的点（截断的点）
+                            # 无论原本可见或不可见，超出边界都标记为不可见
                             pts[j, 2] = 0
+
+                            # 如果启用learn_truncated_kpts，截断的点也参与位置学习
+                            if learn_truncated:
+                                # Clip坐标到边界内用于mask设置
+                                pts_clipped = np.array(
+                                    [np.clip(pts[j, 0], 0, output_res - 1), np.clip(pts[j, 1], 0, output_res - 1)]
+                                )
+
+                                kps[k, j * 2 : j * 2 + 2] = pts[j, :2] - ct_int
+                                kps_mask[k, j * 2 : j * 2 + 2] = 1
+                                pt_int = pts_clipped.astype(np.int32)
+
+                                hp_offset[k * num_joints + j] = pts[j, :2] - pt_int
+                                hp_ind[k * num_joints + j] = pt_int[1] * output_res + pt_int[0]
+                                hp_mask[k * num_joints + j] = 1
+
+                                if sample_debug and k == 0 and j == 0:
+                                    print(
+                                        "[multi_pose sample] {} TRUNCATED first joint after affine=({:.4f}, {:.4f}), "
+                                        "clipped=({:.4f}, {:.4f}), center_int=({:.4f}, {:.4f}), vis={:.1f}, in_bounds=False".format(
+                                            item_tag,
+                                            pts[j, 0],
+                                            pts[j, 1],
+                                            pts_clipped[0],
+                                            pts_clipped[1],
+                                            ct_int[0],
+                                            ct_int[1],
+                                            pts[j, 2],
+                                        )
+                                    )
                     else:
+                        # 不可见且不学习的情况
                         pts[j, 2] = 0
+
                     hp_vis[k, j] = 1.0 if pts[j, 2] > 0 else 0.0
                     if debug_entry is not None:
                         debug_entry[2] = float(pts[j, 2])
                         debug_keypoints.append(debug_entry)
-                if num_joints > 0 and visible_before_aug > 0 and visible_after_aug == 0:
+                if num_joints > 0 and visible_before_aug > 0 and visible_after_aug == 0 and not keep_bbox_without_kpts:
                     hm[cls_id, ct_int[1], ct_int[0]] = 0.9999
                     reg_mask[k] = 0
                 draw_gaussian(hm[cls_id], ct_int, radius)

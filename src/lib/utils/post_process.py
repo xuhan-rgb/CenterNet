@@ -105,6 +105,8 @@ def multi_pose_post_process(dets, c, s, h, w, num_joints=None):
   # return list where each detection is [bbox(4), score(1), keypoints(2 * num_joints), optional visibility(num_joints)]
   ret = []
   B, max_dets, dim = dets.shape
+  print(f"[post_process] Input: dets.shape={dets.shape}, num_joints={num_joints}")
+  print(f"[post_process] First det before transform: bbox={dets[0,0,:4]}, score={dets[0,0,4]}, class={dets[0,0,-1]}")
   inferred_joints = num_joints
   if inferred_joints is None:
     if dim < 6:
@@ -132,20 +134,37 @@ def multi_pose_post_process(dets, c, s, h, w, num_joints=None):
     vis_end = vis_start + vis_len
 
   for i in range(B):
+    classes = dets[i, :, -1].astype(np.int32)
     bbox = transform_preds(dets[i, :, :4].reshape(-1, 2), c[i], s[i], (w, h))
     bbox = bbox.reshape(-1, 4)
     score = dets[i, :, 4:5]
 
     pieces = [bbox, score]
+    print(f"[post_process] After bbox transform: bbox[0]={bbox[0]}, score[0]={score[0]}")
 
     if inferred_joints > 0 and keypoint_end <= dim:
       pts = transform_preds(
         dets[i, :, 5:keypoint_end].reshape(-1, 2), c[i], s[i], (w, h))
       pts = pts.reshape(-1, keypoint_len)
       pieces.append(pts)
+      print(f"[post_process] Added keypoints: pts[0, 0:4]={pts[0, 0:4]}")
     if vis_len > 0 and vis_end <= dim:
       pieces.append(dets[i, :, vis_start:vis_end])
+      print(f"[post_process] Added visibility: vis_start={vis_start}, vis_end={vis_end}, vis[0, 0:4]={dets[i, 0, vis_start:vis_end][:4]}")
 
-    top_preds = np.concatenate(pieces, axis=1).astype(np.float32).tolist()
-    ret.append({np.ones(1, dtype=np.int32)[0]: top_preds})
+    combined = np.concatenate(pieces, axis=1).astype(np.float32)
+    print(f"[post_process] After concatenate: len={combined.shape[1]}, first score={combined[0, 4] if combined.shape[0] > 0 else 'n/a'}")
+
+    top_preds = {}
+    unique_classes = np.unique(classes)
+    for cls_idx in unique_classes:
+      if cls_idx < 0:
+        continue
+      cls_mask = classes == cls_idx
+      if not np.any(cls_mask):
+        continue
+      cls_key = int(cls_idx) + 1
+      top_preds[cls_key] = combined[cls_mask].tolist()
+      print(f"[post_process] class {cls_key}: kept {len(top_preds[cls_key])} entries")
+    ret.append(top_preds)
   return ret

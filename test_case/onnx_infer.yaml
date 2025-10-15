@@ -1,0 +1,26 @@
+onnx_model: model_last_res_18.onnx
+output_dir: result/onnx_infer
+task: multi_pose
+vis_thresh: 0.3
+cross_class_nms_thresh: 0.5
+input_h: 320
+input_w: 640
+mean:
+- 0
+- 0
+- 0
+std:
+- 1
+- 1
+- 1
+input_rgb: true
+class_names: classes.txt
+num_classes: 22
+num_joints: 10
+topk: 100
+max_dets: 50
+save_vis: true
+save_json: true
+print_results: true
+providers: []
+image: data/yolo_annotations/images/train/40.jpg

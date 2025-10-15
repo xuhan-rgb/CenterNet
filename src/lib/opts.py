@@ -13,6 +13,22 @@ class opts(object):
         # basic experiment setting
         self.parser.add_argument("task", default="ctdet", help="ctdet | ddd | multi_pose | exdet")
         self.parser.add_argument("--dataset", default="coco", help="coco | kitti | coco_hp | pascal | yolo_dataset")
+        self.parser.add_argument(
+            "--data_dir",
+            default="",
+            help="override dataset root directory (defaults to <repo>/data when empty)",
+        )
+        self.parser.add_argument(
+            "--yolo_dataset_dir",
+            default="",
+            help="explicit path to YOLO dataset root (overrides data_dir/yolo_annotations)",
+        )
+        self.parser.add_argument(
+            "--yolo_force_num_classes",
+            type=int,
+            default=-1,
+            help="force YOLO dataset class count (defaults to internal setting when <=0)",
+        )
         self.parser.add_argument("--exp_id", default="default")
         self.parser.add_argument("--test", action="store_true")
         self.parser.add_argument(
@@ -182,6 +198,18 @@ class opts(object):
         self.parser.add_argument(
             "--input_rgb", action="store_true", help="convert OpenCV-loaded images from BGR to RGB before normalization"
         )
+        self.parser.add_argument(
+            "--yolo_repeat_factor",
+            type=int,
+            default=1,
+            help="repeat YOLO dataset this many times per epoch (>=1) to balance small datasets",
+        )
+        self.parser.add_argument(
+            "--cross_class_nms_thresh",
+            type=float,
+            default=-1.0,
+            help="apply a class-agnostic NMS with this IoU threshold during decoding/export (<=0 disables)",
+        )
         # multi_pose
         self.parser.add_argument(
             "--aug_rot", type=float, default=0, help="probability of applying " "rotation augmentation."
@@ -254,6 +282,21 @@ class opts(object):
             "--not_reg_hp_offset", action="store_true", help="not regress local offset for " "human joint heatmaps."
         )
         self.parser.add_argument("--not_reg_bbox", action="store_true", help="not regression bounding box size.")
+        self.parser.add_argument(
+            "--learn_invisible_kpts",
+            action="store_true",
+            help="learn from invisible keypoints instead of masking them out during training",
+        )
+        self.parser.add_argument(
+            "--learn_truncated_kpts",
+            action="store_true",
+            help="learn position from truncated/out-of-boundary keypoints (always learn visibility for truncated points)",
+        )
+        self.parser.add_argument(
+            "--keep_bbox_without_kpts",
+            action="store_true",
+            help="keep bbox regression targets even if all keypoints are invisible",
+        )
 
         # ground truth validation
         self.parser.add_argument("--eval_oracle_hm", action="store_true", help="use ground center heatmap.")
@@ -315,7 +358,11 @@ class opts(object):
         print("training chunk_sizes:", opt.chunk_sizes)
 
         opt.root_dir = os.path.join(os.path.dirname(__file__), "..", "..")
-        opt.data_dir = os.path.join(opt.root_dir, "data")
+        provided_data_dir = getattr(opt, "data_dir", "")
+        if provided_data_dir:
+            opt.data_dir = os.path.abspath(os.path.expanduser(provided_data_dir))
+        else:
+            opt.data_dir = os.path.join(opt.root_dir, "data")
         opt.exp_dir = os.path.join(opt.root_dir, "exp", opt.task)
         opt.save_dir = os.path.join(opt.exp_dir, opt.exp_id)
         opt.debug_dir = os.path.join(opt.save_dir, "debug")
@@ -328,7 +375,11 @@ class opts(object):
 
     def update_dataset_info_and_set_heads(self, opt, dataset):
         opt.root_dir = os.path.join(os.path.dirname(__file__), "..", "..")
-        opt.data_dir = os.path.join(opt.root_dir, "data")
+        provided_data_dir = getattr(opt, "data_dir", "")
+        if provided_data_dir:
+            opt.data_dir = os.path.abspath(os.path.expanduser(provided_data_dir))
+        else:
+            opt.data_dir = os.path.join(opt.root_dir, "data")
 
         dataset_spec = {}
         if hasattr(dataset, "get_dataset_spec"):

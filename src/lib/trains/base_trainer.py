@@ -94,6 +94,18 @@ class BaseTrainer(object):
         avg_loss_stats[l].update(
           loss_stats[l].mean().item(), batch['input'].size(0))
         Bar.suffix = Bar.suffix + '|{} {:.4f} '.format(l, avg_loss_stats[l].avg)
+      keypoint_count = None
+      if 'hp_vis_mask' in batch:
+        keypoint_count = batch['hp_vis_mask'].sum().item()
+      elif 'hps_mask' in batch:
+        hps_mask = batch['hps_mask']
+        if hps_mask.numel() > 0:
+          num_coords = hps_mask.size(-1)
+          if num_coords > 0 and num_coords % 2 == 0:
+            reshaped = hps_mask.view(hps_mask.size(0), hps_mask.size(1), num_coords // 2, 2)
+            keypoint_count = (reshaped.sum(dim=-1) > 0).float().sum().item()
+      if keypoint_count is not None:
+        Bar.suffix = Bar.suffix + '|kps {:.0f} '.format(keypoint_count)
       if not opt.hide_data_time:
         Bar.suffix = Bar.suffix + '|Data {dt.val:.3f}s({dt.avg:.3f}s) ' \
           '|Net {bt.avg:.3f}s'.format(dt=data_time, bt=batch_time)

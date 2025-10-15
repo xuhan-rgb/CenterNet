@@ -13,6 +13,8 @@ Contact: [zhouxy2017@gmail.com](mailto:zhouxy2017@gmail.com). Any questions or d
 1. 增加了yolo格式的inference代码，增加了训练的相关配置。
 2. 训练 bash train_keypoints.sh
 3. 测试 bash convert_keypoints_onnx.sh
+4. 训练脚本示例新增 `--yolo_force_num_classes`、`--yolo_dataset_dir` 与 `--keep_bbox_without_kpts` 标志，可直接指定类别数、数据集路径并在全部关键点不可见时仍保留框回归（见 `train_keypoints.sh`）。
+5. `data/test_data/coco_to_yolo.py` 自动生成类别映射，执行 `source ~/anaconda3/bin/activate && conda activate py310 && python data/test_data/coco_to_yolo.py --coco_json <输入COCO标注> --output_dir <输出目录>` 直接完成转换。
 
 ## Updates
 

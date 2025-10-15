@@ -109,3 +109,8 @@ ENV/
 
 # mypy
 .mypy_cache/
+
+result/*
+*.jpg
+*.png
+*.onnx

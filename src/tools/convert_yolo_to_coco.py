@@ -11,7 +11,8 @@ import glob
 import argparse
 from datetime import datetime
 
-def convert_yolo_to_coco(yolo_data_dir, output_dir, split='train'):
+
+def convert_yolo_to_coco(yolo_data_dir, output_dir, split="train"):
     """
     Convert YOLO format dataset to COCO format
 
@@ -33,9 +34,9 @@ def convert_yolo_to_coco(yolo_data_dir, output_dir, split='train'):
     # │   └── test/
     # └── classes.txt
 
-    img_dir = os.path.join(yolo_data_dir, 'images', split)
-    label_dir = os.path.join(yolo_data_dir, 'labels', split)
-    classes_file = os.path.join(yolo_data_dir, 'classes.txt')
+    img_dir = os.path.join(yolo_data_dir, "images", split)
+    label_dir = os.path.join(yolo_data_dir, "labels", split)
+    classes_file = os.path.join(yolo_data_dir, "classes.txt")
 
     if not os.path.exists(img_dir):
         print(f"Images directory not found: {img_dir}")
@@ -47,22 +48,93 @@ def convert_yolo_to_coco(yolo_data_dir, output_dir, split='train'):
 
     # Load class names
     if os.path.exists(classes_file):
-        with open(classes_file, 'r') as f:
+        with open(classes_file, "r") as f:
             class_names = [line.strip() for line in f.readlines()]
     else:
         print(f"Classes file not found: {classes_file}")
         print("Using default COCO classes")
-        class_names = ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
-                      'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat',
-                      'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack',
-                      'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee', 'skis', 'snowboard', 'sports ball',
-                      'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard', 'tennis racket',
-                      'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
-                      'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake',
-                      'chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop',
-                      'mouse', 'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink',
-                      'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier',
-                      'toothbrush']
+        class_names = [
+            "person",
+            "bicycle",
+            "car",
+            "motorcycle",
+            "airplane",
+            "bus",
+            "train",
+            "truck",
+            "boat",
+            "traffic light",
+            "fire hydrant",
+            "stop sign",
+            "parking meter",
+            "bench",
+            "bird",
+            "cat",
+            "dog",
+            "horse",
+            "sheep",
+            "cow",
+            "elephant",
+            "bear",
+            "zebra",
+            "giraffe",
+            "backpack",
+            "umbrella",
+            "handbag",
+            "tie",
+            "suitcase",
+            "frisbee",
+            "skis",
+            "snowboard",
+            "sports ball",
+            "kite",
+            "baseball bat",
+            "baseball glove",
+            "skateboard",
+            "surfboard",
+            "tennis racket",
+            "bottle",
+            "wine glass",
+            "cup",
+            "fork",
+            "knife",
+            "spoon",
+            "bowl",
+            "banana",
+            "apple",
+            "sandwich",
+            "orange",
+            "broccoli",
+            "carrot",
+            "hot dog",
+            "pizza",
+            "donut",
+            "cake",
+            "chair",
+            "couch",
+            "potted plant",
+            "bed",
+            "dining table",
+            "toilet",
+            "tv",
+            "laptop",
+            "mouse",
+            "remote",
+            "keyboard",
+            "cell phone",
+            "microwave",
+            "oven",
+            "toaster",
+            "sink",
+            "refrigerator",
+            "book",
+            "clock",
+            "vase",
+            "scissors",
+            "teddy bear",
+            "hair drier",
+            "toothbrush",
+        ]
 
     # Initialize COCO format structure
     coco_format = {
@@ -72,30 +144,20 @@ def convert_yolo_to_coco(yolo_data_dir, output_dir, split='train'):
             "version": "1.0",
             "year": datetime.now().year,
             "contributor": "YOLO to COCO converter",
-            "date_created": datetime.now().isoformat()
+            "date_created": datetime.now().isoformat(),
         },
-        "licenses": [
-            {
-                "id": 1,
-                "name": "Unknown License",
-                "url": ""
-            }
-        ],
+        "licenses": [{"id": 1, "name": "Unknown License", "url": ""}],
         "images": [],
         "annotations": [],
-        "categories": []
+        "categories": [],
     }
 
     # Add categories
     for i, class_name in enumerate(class_names):
-        coco_format["categories"].append({
-            "id": i + 1,
-            "name": class_name,
-            "supercategory": "object"
-        })
+        coco_format["categories"].append({"id": i + 1, "name": class_name, "supercategory": "object"})
 
     # Get all image files
-    img_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp']
+    img_extensions = ["*.jpg", "*.jpeg", "*.png", "*.bmp"]
     img_files = []
     for ext in img_extensions:
         img_files.extend(glob.glob(os.path.join(img_dir, ext)))
@@ -117,24 +179,20 @@ def convert_yolo_to_coco(yolo_data_dir, output_dir, split='train'):
         filename = os.path.basename(img_path)
 
         # Add image info
-        coco_format["images"].append({
-            "id": img_id + 1,
-            "width": width,
-            "height": height,
-            "file_name": filename,
-            "license": 1
-        })
+        coco_format["images"].append(
+            {"id": img_id + 1, "width": width, "height": height, "file_name": filename, "license": 1}
+        )
 
         # Load corresponding label file
         img_name = os.path.splitext(filename)[0]
-        label_path = os.path.join(label_dir, img_name + '.txt')
+        label_path = os.path.join(label_dir, img_name + ".txt")
 
         if not os.path.exists(label_path):
             print(f"Warning: No label file found for {filename}")
             continue
 
         # Read YOLO annotations
-        with open(label_path, 'r') as f:
+        with open(label_path, "r") as f:
             lines = f.readlines()
 
         for line in lines:
@@ -176,22 +234,24 @@ def convert_yolo_to_coco(yolo_data_dir, output_dir, split='train'):
             h_abs = min(h_abs, height - y)
 
             if w_abs > 0 and h_abs > 0 and class_id < len(class_names):
-                coco_format["annotations"].append({
-                    "id": annotation_id,
-                    "image_id": img_id + 1,
-                    "category_id": class_id + 1,  # COCO categories are 1-indexed
-                    "bbox": [x, y, w_abs, h_abs],
-                    "area": w_abs * h_abs,
-                    "iscrowd": 0
-                })
+                coco_format["annotations"].append(
+                    {
+                        "id": annotation_id,
+                        "image_id": img_id + 1,
+                        "category_id": class_id + 1,  # COCO categories are 1-indexed
+                        "bbox": [x, y, w_abs, h_abs],
+                        "area": w_abs * h_abs,
+                        "iscrowd": 0,
+                    }
+                )
                 annotation_id += 1
 
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
 
     # Save COCO format annotations
-    output_file = os.path.join(output_dir, f'instances_{split}2017.json')
-    with open(output_file, 'w') as f:
+    output_file = os.path.join(output_dir, f"instances_{split}2017.json")
+    with open(output_file, "w") as f:
         json.dump(coco_format, f, indent=2)
 
     print(f"Conversion completed!")
@@ -200,13 +260,18 @@ def convert_yolo_to_coco(yolo_data_dir, output_dir, split='train'):
     print(f"Categories: {len(coco_format['categories'])}")
     print(f"Output saved to: {output_file}")
 
+
 def main():
-    parser = argparse.ArgumentParser(description='Convert YOLO format dataset to COCO format')
-    parser.add_argument('yolo_data_dir', help='Path to YOLO dataset directory')
-    parser.add_argument('--output_dir', default='./coco_annotations',
-                       help='Output directory for COCO annotations (default: ./coco_annotations)')
-    parser.add_argument('--splits', nargs='+', default=['train', 'val'],
-                       help='Dataset splits to convert (default: train val)')
+    parser = argparse.ArgumentParser(description="Convert YOLO format dataset to COCO format")
+    parser.add_argument("yolo_data_dir", help="Path to YOLO dataset directory")
+    parser.add_argument(
+        "--output_dir",
+        default="./coco_annotations",
+        help="Output directory for COCO annotations (default: ./coco_annotations)",
+    )
+    parser.add_argument(
+        "--splits", nargs="+", default=["train", "val"], help="Dataset splits to convert (default: train val)"
+    )
 
     args = parser.parse_args()
 
@@ -218,5 +283,6 @@ def main():
         print(f"\n=== Converting {split} split ===")
         convert_yolo_to_coco(args.yolo_data_dir, args.output_dir, split)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
