@@ -59,7 +59,56 @@ class MultiPoseDataset(data.Dataset):
 
         flipped = False
         if self.split == "train":
-            if not self.opt.not_rand_crop:
+            # 新增选项: 智能crop，确保所有keypoint在边界内
+            use_smart_crop = getattr(self.opt, "smart_crop", False)
+
+            if use_smart_crop:
+                # 智能Crop策略: 基于所有object的keypoint计算安全的crop范围
+                # 收集所有可见keypoint的坐标
+                all_kpts = []
+                for ann in anns:
+                    pts = np.array(ann["keypoints"], np.float32).reshape(-1, 3)
+                    visible_pts = pts[pts[:, 2] > 0, :2]  # 只考虑可见的keypoint
+                    if len(visible_pts) > 0:
+                        all_kpts.append(visible_pts)
+
+                if len(all_kpts) > 0:
+                    all_kpts = np.concatenate(all_kpts, axis=0)
+                    # 计算所有keypoint的边界
+                    kpt_min_x, kpt_min_y = all_kpts.min(axis=0)
+                    kpt_max_x, kpt_max_y = all_kpts.max(axis=0)
+
+                    # 随机缩放比例
+                    scale_factor = np.random.choice(np.arange(0.8, 1.3, 0.1))
+                    s = s * scale_factor
+
+                    # 计算crop后的输出范围（考虑缩放）
+                    # affine变换: output_size / s 对应原图中的范围
+                    crop_size_in_img = s  # 原图中被crop的区域大小
+
+                    # 为了确保所有keypoint都在输出范围内，crop中心需要满足：
+                    # kpt_min, kpt_max 都要在 [c - crop_size/2, c + crop_size/2] 范围内
+                    c_min_x = kpt_max_x - crop_size_in_img / 2.0
+                    c_max_x = kpt_min_x + crop_size_in_img / 2.0
+                    c_min_y = kpt_max_y - crop_size_in_img / 2.0
+                    c_max_y = kpt_min_y + crop_size_in_img / 2.0
+
+                    # 限制在图像边界内
+                    c_min_x = max(crop_size_in_img / 2.0, c_min_x)
+                    c_max_x = min(width - crop_size_in_img / 2.0, c_max_x)
+                    c_min_y = max(crop_size_in_img / 2.0, c_min_y)
+                    c_max_y = min(height - crop_size_in_img / 2.0, c_max_y)
+
+                    # 如果范围有效，随机选择crop中心
+                    if c_max_x > c_min_x and c_max_y > c_min_y:
+                        c[0] = np.random.uniform(c_min_x, c_max_x)
+                        c[1] = np.random.uniform(c_min_y, c_max_y)
+                    # 否则保持原始中心（使用图像中心）
+                else:
+                    # 没有可见keypoint，使用原始策略
+                    s = s * np.random.choice(np.arange(0.8, 1.3, 0.1))
+
+            elif not self.opt.not_rand_crop:
                 s = s * np.random.choice(np.arange(0.6, 1.4, 0.1))
                 w_border = self._get_border(128, img.shape[1])
                 h_border = self._get_border(128, img.shape[0])
@@ -71,6 +120,7 @@ class MultiPoseDataset(data.Dataset):
                 c[0] += s * np.clip(np.random.randn() * cf, -2 * cf, 2 * cf)
                 c[1] += s * np.clip(np.random.randn() * cf, -2 * cf, 2 * cf)
                 s = s * np.clip(np.random.randn() * sf + 1, 1 - sf, 1 + sf)
+
             if np.random.random() < self.opt.aug_rot:
                 rf = self.opt.rotate
                 rot = np.clip(np.random.randn() * rf, -rf * 2, rf * 2)
@@ -113,6 +163,8 @@ class MultiPoseDataset(data.Dataset):
         draw_gaussian = draw_msra_gaussian if self.opt.mse_loss else draw_umich_gaussian
 
         debug_keypoints = [] if debug_aug_vis and num_joints > 0 else None
+        debug_boxes = [] if debug_aug_vis else None
+        debug_kp9 = bool(getattr(self.opt, "debug_kp9", False))
         gt_det = []
         keep_bbox_without_kpts = bool(getattr(self.opt, "keep_bbox_without_kpts", False))
         for k in range(num_objs):
@@ -127,6 +179,12 @@ class MultiPoseDataset(data.Dataset):
             )
             pts = np.array(ann["keypoints"], np.float32).reshape(num_joints, 3)
             pts_for_input = pts.copy() if debug_keypoints is not None else None
+            kp9_orig = None
+            bbox_center_x = None
+            if debug_kp9 and num_joints > 9:
+                kp9_orig = pts[9, :2].copy()
+                bbox_center_x = raw_bbox_xywh[0] + raw_bbox_xywh[2] / 2.0
+
             if sample_debug and k == 0 and num_joints > 0:
                 first_joint = pts[0]
                 print(
@@ -149,12 +207,27 @@ class MultiPoseDataset(data.Dataset):
                 pts[:, 0] = width - pts[:, 0] - 1
                 for e in self.flip_idx:
                     pts[e[0]], pts[e[1]] = pts[e[1]].copy(), pts[e[0]].copy()
+
                 if sample_debug and k == 0 and num_joints > 0:
                     print(
                         "[multi_pose sample] {} after flip first_joint=({:.2f}, {:.2f}), vis={:.1f}".format(
                             item_tag, pts[0, 0], pts[0, 1], pts[0, 2]
                         )
                     )
+
+            if debug_boxes is not None:
+                bbox_vis = bbox.copy()
+                bbox_vis[:2] = affine_transform(bbox_vis[:2], trans_input)
+                bbox_vis[2:] = affine_transform(bbox_vis[2:], trans_input)
+                bbox_vis[[0, 2]] = np.clip(bbox_vis[[0, 2]], 0, self.opt.input_res - 1)
+                bbox_vis[[1, 3]] = np.clip(bbox_vis[[1, 3]], 0, self.opt.input_res - 1)
+                debug_boxes.append(
+                    {
+                        "bbox": bbox_vis,
+                        "cls_id": int(cls_id),
+                        "cls_name": cls_name,
+                    }
+                )
 
             bbox[:2] = affine_transform(bbox[:2], trans_output)
             bbox[2:] = affine_transform(bbox[2:], trans_output)
@@ -167,6 +240,7 @@ class MultiPoseDataset(data.Dataset):
                     radius = max(0, int(round(self.opt.hm_gauss)))
                 ct = np.array([(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=np.float32)
                 ct_int = ct.astype(np.int32)
+
                 if sample_debug and k == 0:
                     print(
                         "[multi_pose sample] {} bbox_affine=({:.2f}, {:.2f}, {:.2f}, {:.2f}), center=({:.2f}, {:.2f}), ct_int=({}, {}), wh=({:.2f}, {:.2f}), rot={:.2f}".format(
@@ -223,10 +297,27 @@ class MultiPoseDataset(data.Dataset):
                     # 对于不可见的关键点，如果启用learn_invisible_kpts，也进行变换
                     kp_is_visible = pts[j, 2] > 0
                     if kp_is_visible or learn_invisible:
+                        # 记录kp9的affine变换
+                        if debug_kp9 and kp9_orig is not None and k < 3 and j == 9:
+                            kp9_before_kp_affine = pts[j, :2].copy()
+
                         pts[j, :2] = affine_transform(pts[j, :2], trans_output_rot)
 
                         # 检查是否在边界内
                         is_in_bounds = 0 <= pts[j, 0] < output_res and 0 <= pts[j, 1] < output_res
+
+                        # 可选的kp9调试：仅保存必要信息
+                        if debug_kp9 and kp9_orig is not None and k < 3 and j == 9:
+                            kp9_affine_info = {
+                                "before": kp9_before_kp_affine.copy(),
+                                "after": pts[j, :2].copy(),
+                                "ct": ct.copy(),
+                                "flipped": bool(flipped),
+                                "in_bounds": bool(is_in_bounds),
+                            }
+                            if not flipped and is_in_bounds and bbox_center_x is not None:
+                                if kp9_orig[0] > bbox_center_x and pts[j, 0] < ct[0]:
+                                    kp9_affine_info["dx_warning"] = True
 
                         if is_in_bounds:
                             # 在边界内的点
@@ -274,7 +365,23 @@ class MultiPoseDataset(data.Dataset):
 
                                 # 对于可见的点或者启用learn_invisible的不可见点，都绘制heatmap
                                 if kp_is_visible or learn_invisible:
+                                    # 先保证关键点自身位置存在峰值
                                     draw_gaussian(hm_hp[j], pt_int, hp_radius)
+
+                                    # if j == 9:
+                                    #     # 额外沿中心点到关键点的线段采样，补充靠近关键点的热力值
+                                    #     x1, y1 = ct_int
+                                    #     x2, y2 = pt_int
+                                    #     num_samples = max(abs(x2 - x1), abs(y2 - y1)) + 1
+                                    #     if num_samples > 1:
+                                    #         x_points = np.linspace(x1, x2, num=num_samples, dtype=int)
+                                    #         y_points = np.linspace(y1, y2, num=num_samples, dtype=int)
+                                    #         line_radius = max(1, hp_radius // 2)
+                                    #         tail_len = max(1, min(num_samples, int(np.ceil(num_samples * 0.5))))
+                                    #         for x_line, y_line in zip(x_points[-tail_len:], y_points[-tail_len:]):
+                                    #             if 0 <= x_line < output_res and 0 <= y_line < output_res:
+                                    #                 draw_gaussian(hm_hp[j], (x_line, y_line), line_radius)
+
                         else:
                             # 超出边界的点（截断的点）
                             # 无论原本可见或不可见，超出边界都标记为不可见
@@ -364,45 +471,66 @@ class MultiPoseDataset(data.Dataset):
             meta = {"c": c, "s": s, "gt_det": gt_det, "img_id": img_id}
             ret["meta"] = meta
 
-        if debug_aug_vis and debug_image is not None and debug_keypoints:
+        if debug_aug_vis and debug_image is not None and (debug_keypoints or debug_boxes):
             overlay = debug_image.copy()
             h_vis, w_vis = overlay.shape[:2]
             summary_tokens = []
-            for entry in debug_keypoints:
-                if len(entry) == 3:
-                    x, y, vis_flag = entry
-                    kp_idx = -1
-                else:
-                    x, y, vis_flag, kp_idx = entry
-                if np.isnan(x) or np.isnan(y):
-                    continue
-                if w_vis == 0 or h_vis == 0:
-                    continue
-                orig_cx, orig_cy = int(round(x)), int(round(y))
-                cx = min(max(orig_cx, 0), w_vis - 1)
-                cy = min(max(orig_cy, 0), h_vis - 1)
-                clipped = (orig_cx != cx) or (orig_cy != cy)
-                color = (0, 255, 0) if vis_flag > 0 else (0, 0, 255)
-                cv2.circle(overlay, (cx, cy), 3, color, -1)
-                if vis_flag <= 0:
-                    cv2.line(overlay, (cx - 4, cy - 4), (cx + 4, cy + 4), color, 1)
-                    cv2.line(overlay, (cx - 4, cy + 4), (cx + 4, cy - 4), color, 1)
-                label = "{}:{}".format(kp_idx if kp_idx >= 0 else "-", int(vis_flag))
-                if clipped:
-                    label += "*"
-                if kp_idx >= 0:
-                    summary_tokens.append(label)
-                text_org = (min(cx + 5, w_vis - 1), max(cy - 5, 0))
-                cv2.putText(
-                    overlay,
-                    label,
-                    text_org,
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.35,
-                    color,
-                    1,
-                    cv2.LINE_AA,
-                )
+            if debug_boxes:
+                for box_info in debug_boxes:
+                    x1, y1, x2, y2 = box_info["bbox"]
+                    pt1 = (int(round(x1)), int(round(y1)))
+                    pt2 = (int(round(x2)), int(round(y2)))
+                    cv2.rectangle(overlay, pt1, pt2, (255, 165, 0), 1)
+                    label = "cls{}".format(box_info["cls_id"])
+                    if box_info.get("cls_name"):
+                        label = box_info["cls_name"]
+                    text_org = (pt1[0], max(pt1[1] - 4, 0))
+                    cv2.putText(
+                        overlay,
+                        label,
+                        text_org,
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.35,
+                        (255, 165, 0),
+                        1,
+                        cv2.LINE_AA,
+                    )
+            if debug_keypoints:
+                for entry in debug_keypoints:
+                    if len(entry) == 3:
+                        x, y, vis_flag = entry
+                        kp_idx = -1
+                    else:
+                        x, y, vis_flag, kp_idx = entry
+                    if np.isnan(x) or np.isnan(y):
+                        continue
+                    if w_vis == 0 or h_vis == 0:
+                        continue
+                    orig_cx, orig_cy = int(round(x)), int(round(y))
+                    cx = min(max(orig_cx, 0), w_vis - 1)
+                    cy = min(max(orig_cy, 0), h_vis - 1)
+                    clipped = (orig_cx != cx) or (orig_cy != cy)
+                    color = (0, 255, 0) if vis_flag > 0 else (0, 0, 255)
+                    cv2.circle(overlay, (cx, cy), 3, color, -1)
+                    if vis_flag <= 0:
+                        cv2.line(overlay, (cx - 4, cy - 4), (cx + 4, cy + 4), color, 1)
+                        cv2.line(overlay, (cx - 4, cy + 4), (cx + 4, cy - 4), color, 1)
+                    label = "{}:{}".format(kp_idx if kp_idx >= 0 else "-", int(vis_flag))
+                    if clipped:
+                        label += "*"
+                    if kp_idx >= 0:
+                        summary_tokens.append(label)
+                    text_org = (min(cx + 5, w_vis - 1), max(cy - 5, 0))
+                    cv2.putText(
+                        overlay,
+                        label,
+                        text_org,
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.35,
+                        color,
+                        1,
+                        cv2.LINE_AA,
+                    )
 
             if summary_tokens:
                 summary_text = "kps " + " ".join(sorted(summary_tokens))
@@ -417,21 +545,58 @@ class MultiPoseDataset(data.Dataset):
                     cv2.LINE_AA,
                 )
 
-                save_dir = getattr(self, "_debug_aug_tmp_dir", None)
-                if save_dir:
-                    save_name = "{}_aug_{}.jpg".format(os.path.splitext(file_name)[0], int(item_timestamp * 1000))
-                    save_path = os.path.join(save_dir, save_name)
-                    if cv2.imwrite(save_path, overlay):
-                        log_msg = "[multi_pose debug] saved augmented vis: {}".format(save_path)
+            save_dir = getattr(self, "_debug_aug_tmp_dir", None)
+            if save_dir:
+                base_name = os.path.splitext(file_name)[0]
+                timestamp_str = int(item_timestamp * 1000)
+                overlay_path = os.path.join(save_dir, "{}_aug_{}.jpg".format(base_name, timestamp_str))
+                if cv2.imwrite(overlay_path, overlay):
+                    log_msg = "[multi_pose debug] saved augmented vis: {}".format(overlay_path)
+                    if sample_debug:
+                        print(log_msg, flush=True)
+                    try:
+                        with open(os.path.join(save_dir, "aug_vis_log.txt"), "a") as log_f:
+                            log_f.write(log_msg + "\n")
+                    except OSError as exc:
                         if sample_debug:
-                            print(log_msg, flush=True)
-                        try:
-                            with open(os.path.join(save_dir, "aug_vis_log.txt"), "a") as log_f:
-                                log_f.write(log_msg + "\n")
-                        except OSError as exc:
-                            if sample_debug:
-                                print("[multi_pose debug] failed to append log: {}".format(exc), flush=True)
-                    else:
-                        if sample_debug:
-                            print("[multi_pose debug] failed to save augmented vis: {}".format(save_path), flush=True)
+                            print("[multi_pose debug] failed to append log: {}".format(exc), flush=True)
+                else:
+                    if sample_debug:
+                        print("[multi_pose debug] failed to save augmented vis: {}".format(overlay_path), flush=True)
+
+                def _save_heatmap(tag, heatmap_2d):
+                    if heatmap_2d is None or heatmap_2d.size == 0:
+                        return None
+                    heatmap_norm = np.clip(heatmap_2d, 0.0, 1.0)
+                    heatmap_u8 = np.round(heatmap_norm * 255.0).astype(np.uint8)
+                    heatmap_color = cv2.applyColorMap(heatmap_u8, cv2.COLORMAP_JET)
+                    heatmap_color = cv2.resize(
+                        heatmap_color,
+                        (self.opt.input_res, self.opt.input_res),
+                        interpolation=cv2.INTER_LINEAR,
+                    )
+                    heatmap_path = os.path.join(save_dir, "{}_{}_{}.jpg".format(base_name, tag, timestamp_str))
+                    overlay_img = cv2.addWeighted(debug_image.astype(np.uint8), 0.6, heatmap_color, 0.4, 0.0)
+                    overlay_path = os.path.join(save_dir, "{}_{}_overlay_{}.jpg".format(base_name, tag, timestamp_str))
+                    cv2.imwrite(heatmap_path, heatmap_color)
+                    cv2.imwrite(overlay_path, overlay_img)
+                    return heatmap_path, overlay_path
+
+                hm_paths = _save_heatmap("hm", np.max(hm, axis=0) if hm.size > 0 else None)
+
+                kp_paths = []
+                if num_joints > 0:
+                    for j in range(num_joints):
+                        result = _save_heatmap("hm_kp{:02d}".format(j), hm_hp[j])
+                        if result is not None:
+                            kp_paths.append(result[0])
+                    kp_all = _save_heatmap("hm_all_kps", np.max(hm_hp, axis=0))
+
+                    if sample_debug and (hm_paths or kp_paths or kp_all):
+                        print(
+                            "[multi_pose debug] saved heatmaps for {} (det={}, joints={}, combined={})".format(
+                                file_name, hm_paths, len(kp_paths), kp_all
+                            ),
+                            flush=True,
+                        )
         return ret

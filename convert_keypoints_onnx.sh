@@ -25,7 +25,7 @@ python src/convert_to_onnx.py multi_pose \
  --arch res_18 \
  --yolo_num_kpts 10 \
  --input_h 320 --input_w 640 \
- --test_image /home/qwer/charger_program/CenterNet/data/yolo_annotations/images/train/40.jpg \
+ --test_image /home/qwer/charger_program/CenterNet/data/yolo_annotations/images/train/140.jpg \
  --vis_thresh 0.1 \
  --save_vis \
  --save_heatmaps \

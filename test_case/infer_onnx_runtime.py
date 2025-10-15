@@ -40,6 +40,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 DETAIL_LOG_ENABLED = bool(int(os.environ.get("ONNX_INFER_DETAIL_LOGS", "0")))
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
 
 def log_info(msg, detail=False):
@@ -70,8 +71,6 @@ def _normalize_class_names(class_names, num_classes=None):
     else:
         names = names[:num_classes]
     return names
-
-
 
 
 def load_yaml_config(config_path):
@@ -164,6 +163,7 @@ def _topk(scores, K=40):
     topk_xs = (topk_inds % width).astype(np.float32)
     return topk_score.astype(np.float32), topk_inds, topk_clses, topk_ys, topk_xs
 
+
 def get_dir(src_point, rot_rad):
     sn, cs = math.sin(rot_rad), math.cos(rot_rad)
     src_result = [0, 0]
@@ -255,7 +255,6 @@ def preprocess_image(image_path, input_h, input_w, mean, std, use_rgb=False):
     return inp, original_img, (height, width), center, scale
 
 
-
 def ctdet_decode(heat, wh, reg=None, cat_spec_wh=False, K=100):
     batch, cat, height, width = heat.shape
     heat = _nms(heat)
@@ -293,9 +292,7 @@ def ctdet_decode(heat, wh, reg=None, cat_spec_wh=False, K=100):
         axis=2,
     )
 
-    detections = np.concatenate(
-        [bboxes, scores[..., None], clses[..., None]], axis=2
-    ).astype(np.float32)
+    detections = np.concatenate([bboxes, scores[..., None], clses[..., None]], axis=2).astype(np.float32)
     return detections
 
 
@@ -412,9 +409,7 @@ def multi_pose_decode(
         selected_dist = np.take_along_axis(dist, selected_idx[..., None], axis=3)
         cond_dist = selected_dist > size_term
 
-        reject_mask = (
-            cond_left | cond_right | cond_top | cond_bottom | cond_score | cond_dist
-        ).astype(np.float32)
+        reject_mask = (cond_left | cond_right | cond_top | cond_bottom | cond_score | cond_dist).astype(np.float32)
         reject_mask = np.repeat(reject_mask, 2, axis=3)
 
         mixed_kps = (1 - reject_mask) * hm_kps_selected + reject_mask * reg_kps
@@ -429,6 +424,7 @@ def multi_pose_decode(
     if return_initial_kps:
         return detections, initial_kps_flat
     return detections
+
 
 def ctdet_post_process(dets, c, s, h, w, num_classes):
     ret = []
@@ -480,9 +476,9 @@ def multi_pose_post_process(dets, c, s, h, w, num_joints=None):
         pieces = [bbox, score]
 
         if inferred_joints > 0 and keypoint_end <= dim:
-            pts = transform_preds(
-                dets[i, :, 5:keypoint_end].reshape(-1, 2), c[i], s[i], (w, h)
-            ).reshape(-1, keypoint_len)
+            pts = transform_preds(dets[i, :, 5:keypoint_end].reshape(-1, 2), c[i], s[i], (w, h)).reshape(
+                -1, keypoint_len
+            )
             pieces.append(pts)
         if vis_len > 0 and vis_end <= dim:
             pieces.append(dets[i, :, vis_start:vis_end])
@@ -541,7 +537,6 @@ def _apply_cross_class_nms(detections, iou_thresh):
             if _bbox_iou(bbox_i, bbox_j) > iou_thresh:
                 suppressed[j] = True
     return keep
-
 
 
 def postprocess_detections(outputs, opt, center, scale):
@@ -654,9 +649,7 @@ def postprocess_detections(outputs, opt, center, scale):
                 visibilities = []
                 if num_joints > 0:
                     kp_vals = entry[5 : 5 + num_joints * 2]
-                    keypoints = [
-                        (float(kp_vals[2 * j]), float(kp_vals[2 * j + 1])) for j in range(num_joints)
-                    ]
+                    keypoints = [(float(kp_vals[2 * j]), float(kp_vals[2 * j + 1])) for j in range(num_joints)]
                     vis_start = 5 + num_joints * 2
                     vis_end = vis_start + num_joints
                     if len(entry) >= vis_end:
@@ -759,6 +752,8 @@ def visualize_detections(image, detections, class_names=None, save_path=None, ke
 
     if save_path:
         cv2.imwrite(save_path, vis_img)
+        cv2.imshow("vis", vis_img)
+        cv2.waitKey(0)
     return vis_img
 
 
@@ -942,9 +937,24 @@ def main():
             must_exist=True,
         )
     if not os.path.exists(image_path):
-        log_error(f"Image not found: {image_path}")
+        log_error(f"Image path not found: {image_path}")
         return
-    cfg.image = image_path
+
+    image_paths = []
+    if os.path.isdir(image_path):
+        for entry in sorted(os.listdir(image_path)):
+            entry_path = os.path.join(image_path, entry)
+            if not os.path.isfile(entry_path):
+                continue
+            ext = os.path.splitext(entry)[1].lower()
+            if ext in IMAGE_EXTENSIONS:
+                image_paths.append(entry_path)
+        if not image_paths:
+            log_error(f"No image files found in directory: {image_path}")
+            return
+    else:
+        image_paths = [image_path]
+    cfg.image = image_paths[0]
 
     output_dir = getattr(cfg, "output_dir", "result/onnx_infer")
     if not os.path.isabs(output_dir):
@@ -1000,64 +1010,67 @@ def main():
     input_meta = ort_session.get_inputs()[0]
     input_h, input_w = _determine_input_size(input_meta.shape, cfg.input_h, cfg.input_w)
 
-    log_info("[step] preprocessing image...")
-    (
-        input_tensor,
-        original_img,
-        original_size,
-        center,
-        scale,
-    ) = preprocess_image(
-        cfg.image,
-        input_h,
-        input_w,
-        mean_arr,
-        std_arr,
-        use_rgb=cfg.input_rgb,
-    )
-
-    log_info("[step] running onnx inference...")
-    ort_inputs = {input_meta.name: input_tensor}
-    ort_outputs = ort_session.run(None, ort_inputs)
+    _ensure_dir(cfg.output_dir)
+    total_images = len(image_paths)
     output_names = [meta.name or f"head_{idx}" for idx, meta in enumerate(ort_session.get_outputs())]
     log_info(f"[onnx] outputs: {output_names}", detail=True)
-    log_info(f"[onnx] output shapes: {[np.shape(out) for out in ort_outputs]}", detail=True)
+    log_info(f"[init] collected {total_images} image(s) for inference.")
 
-    _ensure_dir(cfg.output_dir)
-    image_basename = os.path.splitext(os.path.basename(cfg.image))[0]
+    for img_idx, img_path in enumerate(image_paths, start=1):
+        cfg.image = img_path
+        image_basename = os.path.splitext(os.path.basename(img_path))[0]
+        log_info(f"[step] preprocessing image ({img_idx}/{total_images}): {img_path}")
+        (
+            input_tensor,
+            original_img,
+            original_size,
+            center,
+            scale,
+        ) = preprocess_image(
+            img_path,
+            input_h,
+            input_w,
+            mean_arr,
+            std_arr,
+            use_rgb=cfg.input_rgb,
+        )
 
-    opt = _create_opt_namespace(
-        cfg,
-        ort_outputs,
-        output_names,
-        original_img,
-        input_h,
-        input_w,
-        class_names,
-    )
+        log_info(f"[step] running onnx inference ({img_idx}/{total_images})...")
+        ort_inputs = {input_meta.name: input_tensor}
+        ort_outputs = ort_session.run(None, ort_inputs)
+        log_info(f"[onnx] output shapes: {[np.shape(out) for out in ort_outputs]}", detail=True)
 
-    log_info("[step] postprocessing detections...")
-    detections = postprocess_detections(ort_outputs, opt, center, scale)
-    detections = detections[: opt.max_dets]
-    log_info(f"[result] detections kept: {len(detections)}")
+        opt = _create_opt_namespace(
+            cfg,
+            ort_outputs,
+            output_names,
+            original_img,
+            input_h,
+            input_w,
+            class_names,
+        )
 
-    if opt.print_results:
-        for idx, det in enumerate(detections):
-            cls_id = int(det.get("class_id", -1))
-            score = float(det.get("confidence", 0.0))
-            bbox = det.get("bbox", [0, 0, 0, 0])
-            cls_name = (
-                class_names[cls_id]
-                if class_names and 0 <= cls_id < len(class_names)
-                else f"class_{cls_id}"
-            )
-            print(
-                "  #{:02d}: cls={} ({}) score={:.3f} bbox=[{:.1f}, {:.1f}, {:.1f}, {:.1f}]".format(
-                    idx, cls_id, cls_name, score, bbox[0], bbox[1], bbox[2], bbox[3]
+        log_info(f"[step] postprocessing detections ({img_idx}/{total_images})...")
+        detections = postprocess_detections(ort_outputs, opt, center, scale)
+        detections = detections[: opt.max_dets]
+        log_info(f"[result] {image_basename}: detections kept -> {len(detections)}")
+
+        if opt.print_results:
+            print(f"[image] {image_basename} ({img_idx}/{total_images})")
+            for det_idx, det in enumerate(detections):
+                cls_id = int(det.get("class_id", -1))
+                score = float(det.get("confidence", 0.0))
+                bbox = det.get("bbox", [0, 0, 0, 0])
+                cls_name = (
+                    class_names[cls_id] if class_names and 0 <= cls_id < len(class_names) else f"class_{cls_id}"
                 )
-            )
+                print(
+                    "  #{:02d}: cls={} ({}) score={:.3f} bbox=[{:.1f}, {:.1f}, {:.1f}, {:.1f}]".format(
+                        det_idx, cls_id, cls_name, score, bbox[0], bbox[1], bbox[2], bbox[3]
+                    )
+                )
 
-    _save_results(opt, image_basename, detections, class_names)
+        _save_results(opt, image_basename, detections, class_names)
 
     log_info("[done] inference finished.")
 

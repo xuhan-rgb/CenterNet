@@ -15,6 +15,10 @@ Contact: [zhouxy2017@gmail.com](mailto:zhouxy2017@gmail.com). Any questions or d
 3. 测试 bash convert_keypoints_onnx.sh
 4. 训练脚本示例新增 `--yolo_force_num_classes`、`--yolo_dataset_dir` 与 `--keep_bbox_without_kpts` 标志，可直接指定类别数、数据集路径并在全部关键点不可见时仍保留框回归（见 `train_keypoints.sh`）。
 5. `data/test_data/coco_to_yolo.py` 自动生成类别映射，执行 `source ~/anaconda3/bin/activate && conda activate py310 && python data/test_data/coco_to_yolo.py --coco_json <输入COCO标注> --output_dir <输出目录>` 直接完成转换。
+6. 保存数据增强后的图像、框、关键点与热力图：在训练或数据调试命令中追加标志 `--debug_aug_vis`，例如 `source ~/anaconda3/bin/activate && conda activate py310 && python src/main.py multi_pose --exp_id debug_aug --debug_aug_vis ...`。增强样本将保存到 `tmp/`，包含边框/关键点叠加图、检测热力图与关键点热力图（含原图叠加）。
+7. `test_case/infer_onnx_runtime.py` 现支持直接传入图片目录：`python infer_onnx_runtime.py --config onnx_infer.yaml path/to/dir/` 会自动批量处理目录下常见格式图片，并按文件名输出可视化/JSON。
+8. `src/convert_to_onnx.py` 在推理测试时可指定 `--test_label` 结合 `--eval_iou_thresh` 计算检测准确率与关键点平均偏差，输出到日志中便于核对。
+9. `test_case/eval_onnx_dataset.py` 可对 `data/yolo_annotations` 等数据集的 `train`/`val` 子集批量评估ONNX模型精度，输出可见度为0/1的平均偏差与准确率：`python eval_onnx_dataset.py --config onnx_infer.yaml --dataset_root data/yolo_annotations/ --splits train val`。
 
 ## Updates
 

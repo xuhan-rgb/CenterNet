@@ -123,20 +123,101 @@ def gaussian2D(shape, sigma=1):
     h[h < np.finfo(h.dtype).eps * h.max()] = 0
     return h
 
+def gaussian2D_ellipse(shape, sigma_x=1, sigma_y=1, theta=0):
+    """
+    生成椭圆形的2D高斯核
+
+    参数:
+        shape: (height, width) 高斯核的形状
+        sigma_x: x方向的标准差(控制宽度)
+        sigma_y: y方向的标准差(控制高度)
+        theta: 旋转角度(弧度),0表示不旋转
+
+    返回:
+        椭圆形高斯核
+    """
+    # 防止除零错误,确保sigma至少为一个很小的正数
+    sigma_x = max(sigma_x, 1e-6)
+    sigma_y = max(sigma_y, 1e-6)
+
+    m, n = [(ss - 1.) / 2. for ss in shape]
+    y, x = np.ogrid[-m:m+1, -n:n+1]
+
+    # 如果有旋转角度,应用旋转变换
+    # 注意: numpy ogrid中 y在前(行), x在后(列)
+    # 旋转公式: [x', y'] = [cos(θ) -sin(θ)][x]
+    #                       [sin(θ)  cos(θ)][y]
+    if theta != 0:
+        cos_theta = np.cos(theta)
+        sin_theta = np.sin(theta)
+        # 旋转坐标系 (注意x对应列,y对应行)
+        x_rot = x * cos_theta + y * sin_theta
+        y_rot = -x * sin_theta + y * cos_theta
+    else:
+        x_rot = x
+        y_rot = y
+
+    # 椭圆高斯公式
+    h = np.exp(-((x_rot * x_rot) / (2 * sigma_x * sigma_x) +
+                 (y_rot * y_rot) / (2 * sigma_y * sigma_y)))
+    h[h < np.finfo(h.dtype).eps * h.max()] = 0
+    return h
+
 def draw_umich_gaussian(heatmap, center, radius, k=1):
   diameter = 2 * radius + 1
   gaussian = gaussian2D((diameter, diameter), sigma=diameter / 6)
-  
+
   x, y = int(center[0]), int(center[1])
 
   height, width = heatmap.shape[0:2]
-    
+
   left, right = min(x, radius), min(width - x, radius + 1)
   top, bottom = min(y, radius), min(height - y, radius + 1)
 
   masked_heatmap  = heatmap[y - top:y + bottom, x - left:x + right]
   masked_gaussian = gaussian[radius - top:radius + bottom, radius - left:radius + right]
   if min(masked_gaussian.shape) > 0 and min(masked_heatmap.shape) > 0: # TODO debug
+    np.maximum(masked_heatmap, masked_gaussian * k, out=masked_heatmap)
+  return heatmap
+
+def draw_umich_gaussian_ellipse(heatmap, center, radius_x, radius_y, theta=0, k=1):
+  """
+  绘制椭圆形的高斯热图
+
+  参数:
+      heatmap: 热图数组
+      center: (x, y) 中心点坐标
+      radius_x: x方向的半径
+      radius_y: y方向的半径
+      theta: 旋转角度(弧度)
+      k: 高斯强度系数
+
+  返回:
+      更新后的热图
+  """
+  # 确保半径至少为1,防止除零错误
+  radius_x = max(1, int(radius_x))
+  radius_y = max(1, int(radius_y))
+
+  # 使用较大的半径来确保椭圆完全包含
+  radius = max(radius_x, radius_y)
+  diameter = 2 * radius + 1
+
+  # 生成椭圆高斯核
+  sigma_x = radius_x / 3.0  # 类似于原来的 diameter / 6
+  sigma_y = radius_y / 3.0
+  gaussian = gaussian2D_ellipse((diameter, diameter), sigma_x=sigma_x, sigma_y=sigma_y, theta=theta)
+
+  x, y = int(center[0]), int(center[1])
+
+  height, width = heatmap.shape[0:2]
+
+  left, right = min(x, radius), min(width - x, radius + 1)
+  top, bottom = min(y, radius), min(height - y, radius + 1)
+
+  masked_heatmap  = heatmap[y - top:y + bottom, x - left:x + right]
+  masked_gaussian = gaussian[radius - top:radius + bottom, radius - left:radius + right]
+  if min(masked_gaussian.shape) > 0 and min(masked_heatmap.shape) > 0:
     np.maximum(masked_heatmap, masked_gaussian * k, out=masked_heatmap)
   return heatmap
 
@@ -186,6 +267,68 @@ def draw_msra_gaussian(heatmap, center, sigma):
   y = x[:, np.newaxis]
   x0 = y0 = size // 2
   g = np.exp(- ((x - x0) ** 2 + (y - y0) ** 2) / (2 * sigma ** 2))
+  g_x = max(0, -ul[0]), min(br[0], h) - ul[0]
+  g_y = max(0, -ul[1]), min(br[1], w) - ul[1]
+  img_x = max(0, ul[0]), min(br[0], h)
+  img_y = max(0, ul[1]), min(br[1], w)
+  heatmap[img_y[0]:img_y[1], img_x[0]:img_x[1]] = np.maximum(
+    heatmap[img_y[0]:img_y[1], img_x[0]:img_x[1]],
+    g[g_y[0]:g_y[1], g_x[0]:g_x[1]])
+  return heatmap
+
+def draw_msra_gaussian_ellipse(heatmap, center, sigma_x, sigma_y, theta=0):
+  """
+  绘制椭圆形的MSRA风格高斯热图
+
+  参数:
+      heatmap: 热图数组
+      center: (x, y) 中心点坐标
+      sigma_x: x方向的标准差
+      sigma_y: y方向的标准差
+      theta: 旋转角度(弧度)
+
+  返回:
+      更新后的热图
+  """
+  # 确保sigma至少为一个很小的正数,防止除零错误
+  sigma_x = max(sigma_x, 1e-6)
+  sigma_y = max(sigma_y, 1e-6)
+
+  tmp_size = int(max(sigma_x, sigma_y) * 3)
+  if tmp_size == 0:
+    tmp_size = 1
+
+  mu_x = int(center[0] + 0.5)
+  mu_y = int(center[1] + 0.5)
+  w, h = heatmap.shape[0], heatmap.shape[1]
+  ul = [int(mu_x - tmp_size), int(mu_y - tmp_size)]
+  br = [int(mu_x + tmp_size + 1), int(mu_y + tmp_size + 1)]
+  if ul[0] >= h or ul[1] >= w or br[0] < 0 or br[1] < 0:
+    return heatmap
+  size = 2 * tmp_size + 1
+  x = np.arange(0, size, 1, np.float32)
+  y = x[:, np.newaxis]
+  x0 = y0 = size // 2
+
+  # 计算相对于中心的坐标
+  x_centered = x - x0
+  y_centered = y - y0
+
+  # 如果有旋转角度,应用旋转变换
+  # 注意: x是列坐标, y是行坐标(通过newaxis变换)
+  if theta != 0:
+    cos_theta = np.cos(theta)
+    sin_theta = np.sin(theta)
+    # 旋转坐标系
+    x_rot = x_centered * cos_theta + y_centered * sin_theta
+    y_rot = -x_centered * sin_theta + y_centered * cos_theta
+  else:
+    x_rot = x_centered
+    y_rot = y_centered
+
+  # 椭圆高斯公式
+  g = np.exp(- (x_rot ** 2 / (2 * sigma_x ** 2) + y_rot ** 2 / (2 * sigma_y ** 2)))
+
   g_x = max(0, -ul[0]), min(br[0], h) - ul[0]
   g_y = max(0, -ul[1]), min(br[1], w) - ul[1]
   img_x = max(0, ul[0]), min(br[0], h)

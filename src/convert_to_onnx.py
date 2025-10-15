@@ -1083,6 +1083,162 @@ def _log_prediction_vs_gt(pred, gt_entries):
             pass
 
 
+def evaluate_detection_metrics(detections, gt_entries, num_joints=0, iou_thresh=0.5, verbose=True):
+    """
+    Evaluate detections against provided ground-truth annotations.
+
+    Args:
+        detections (list): detector outputs after post-processing.
+        gt_entries (list): ground-truth entries loaded from label file.
+        num_joints (int): expected number of keypoints (optional).
+        iou_thresh (float): IoU threshold for matching predictions to GT.
+    """
+    if not gt_entries:
+        if verbose:
+            log_info("[eval] ground-truth annotations not provided, skip evaluation", "detail")
+        return None
+
+    total_gt = len(gt_entries)
+    total_det = len(detections)
+    if total_det == 0:
+        if verbose:
+            log_info(f"[eval] no detections available to compare with {total_gt} ground-truth entries")
+        return {
+            "matches": 0,
+            "total_gt": total_gt,
+            "total_det": total_det,
+            "recall": 0.0,
+            "precision": 0.0,
+            "mean_iou": 0.0,
+            "iou_sum": 0.0,
+            "keypoint_mean_l2": 0.0,
+            "keypoint_total_count": 0,
+            "keypoint_total_l2": 0.0,
+            "per_joint_sums": [],
+            "per_joint_counts": [],
+        }
+
+    if iou_thresh is None:
+        iou_thresh = 0.0
+    iou_thresh = max(0.0, float(iou_thresh))
+
+    detections_sorted = sorted(detections, key=lambda d: d.get("confidence", 0.0), reverse=True)
+    used_gt = set()
+    matches = []
+    unmatched_det = []
+
+    for det in detections_sorted:
+        best_iou = -1.0
+        best_idx = -1
+        det_bbox = det.get("bbox", [0.0, 0.0, 0.0, 0.0])
+        det_cls = int(det.get("class_id", -1))
+        for idx, gt in enumerate(gt_entries):
+            if idx in used_gt:
+                continue
+            gt_cls = int(gt.get("class_id", -1))
+            if gt_cls != det_cls:
+                continue
+            iou = _bbox_iou(det_bbox, gt.get("bbox", [0.0, 0.0, 0.0, 0.0]))
+            if iou > best_iou:
+                best_iou = iou
+                best_idx = idx
+        if best_idx >= 0 and best_iou >= iou_thresh:
+            used_gt.add(best_idx)
+            matches.append((det, gt_entries[best_idx], best_iou))
+        else:
+            unmatched_det.append(det)
+
+    match_count = len(matches)
+    recall = match_count / total_gt if total_gt > 0 else 0.0
+    precision = match_count / total_det if total_det > 0 else 0.0
+    iou_values = [m[2] for m in matches]
+    sum_iou = float(np.sum(iou_values)) if iou_values else 0.0
+    mean_iou = sum_iou / match_count if match_count > 0 else 0.0
+
+    if verbose:
+        log_info(
+            (
+                "[eval] IoU_thresh={:.2f} | matches={} | total_gt={} | total_det={} | "
+                "recall={:.3f} | precision={:.3f} | mean_IoU={:.3f}"
+            ).format(iou_thresh, match_count, total_gt, total_det, recall, precision, mean_iou)
+        )
+
+    unmatched_gt = total_gt - match_count
+    if verbose and (unmatched_gt or unmatched_det):
+        log_info(
+            f"[eval] unmatched counts -> gt:{unmatched_gt} det:{len(unmatched_det)}",
+            "detail",
+        )
+
+    # Keypoint metrics
+    import math
+
+    per_joint_sums = None
+    per_joint_counts = None
+    total_kp_l2 = 0.0
+    total_kp_count = 0
+
+    target_joint_count = int(num_joints) if int(num_joints) > 0 else 0
+
+    for det, gt, _ in matches:
+        det_kps = det.get("keypoints") or []
+        gt_kps = gt.get("keypoints") or []
+        if not det_kps or not gt_kps:
+            continue
+        usable = min(len(det_kps), len(gt_kps))
+        if target_joint_count > 0:
+            usable = min(usable, target_joint_count)
+        if usable <= 0:
+            continue
+        if per_joint_sums is None:
+            size = target_joint_count if target_joint_count > 0 else usable
+            per_joint_sums = [0.0] * size
+            per_joint_counts = [0] * size
+        if usable > len(per_joint_sums):
+            extra = usable - len(per_joint_sums)
+            per_joint_sums.extend([0.0] * extra)
+            per_joint_counts.extend([0] * extra)
+        for idx in range(usable):
+            dx = float(det_kps[idx][0]) - float(gt_kps[idx][0])
+            dy = float(det_kps[idx][1]) - float(gt_kps[idx][1])
+            l2 = math.hypot(dx, dy)
+            per_joint_sums[idx] += l2
+            per_joint_counts[idx] += 1
+            total_kp_l2 += l2
+            total_kp_count += 1
+
+    if total_kp_count > 0:
+        mean_l2 = total_kp_l2 / total_kp_count
+        joint_means = []
+        for idx, count in enumerate(per_joint_counts or []):
+            if count > 0:
+                joint_means.append((idx, per_joint_sums[idx] / count))
+        joint_str = ", ".join(f"j{idx}:{val:.2f}" for idx, val in joint_means)
+        if verbose:
+            log_info(f"[eval] keypoint mean L2={mean_l2:.3f}px" + (f" | per-joint: {joint_str}" if joint_str else ""))
+    else:
+        if verbose:
+            log_info("[eval] keypoint metrics unavailable (no matched keypoints)", "detail")
+        mean_l2 = 0.0
+        per_joint_sums = per_joint_sums or []
+        per_joint_counts = per_joint_counts or []
+
+    return {
+        "matches": match_count,
+        "total_gt": total_gt,
+        "total_det": total_det,
+        "recall": recall,
+        "precision": precision,
+        "mean_iou": mean_iou,
+        "iou_sum": float(sum_iou),
+        "keypoint_mean_l2": mean_l2,
+        "keypoint_total_count": total_kp_count,
+        "keypoint_total_l2": total_kp_l2,
+        "per_joint_sums": per_joint_sums if per_joint_sums is not None else [],
+        "per_joint_counts": per_joint_counts if per_joint_counts is not None else [],
+    }
+
+
 def test_image_inference(pytorch_model, opt):
     """测试单张图像推理"""
     import onnxruntime as ort
@@ -1296,6 +1452,7 @@ def test_image_inference(pytorch_model, opt):
 
     save_onnx_io_dump(image_base_name, input_tensor, output_names, ort_outputs, detections)
 
+    gt_entries = []
     if opt.test_label:
         gt_entries = load_yolo_ground_truth(
             opt.test_label,
@@ -1368,6 +1525,14 @@ def test_image_inference(pytorch_model, opt):
     else:
         log_info("No detections found")
 
+    if opt.test_label and gt_entries:
+        evaluate_detection_metrics(
+            detections,
+            gt_entries,
+            getattr(opt, "num_joints", 0),
+            getattr(opt, "eval_iou_thresh", 0.5),
+        )
+
 
 def main():
     # Create opts object and add ONNX specific arguments
@@ -1391,6 +1556,12 @@ def main():
         "--force_network_input",
         action="store_true",
         help="Use the provided network_input_txt even if it differs from fresh preprocessing",
+    )
+    opts_obj.parser.add_argument(
+        "--eval_iou_thresh",
+        type=float,
+        default=0.5,
+        help="IoU threshold used for accuracy/keypoint evaluation when label is provided",
     )
 
     opt = opts_obj.parse()
@@ -1420,6 +1591,8 @@ def main():
         opt.force_network_input = False
     if not hasattr(opt, "input_rgb"):
         opt.input_rgb = False
+    if not hasattr(opt, "eval_iou_thresh"):
+        opt.eval_iou_thresh = 0.5
 
     # Set default dataset info if not specified
     if not hasattr(opt, "heads") or opt.heads is None:

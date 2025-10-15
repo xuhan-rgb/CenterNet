@@ -166,6 +166,11 @@ class opts(object):
             "--no_color_aug", action="store_true", help="not use the color augmenation " "from CornerNet"
         )
         self.parser.add_argument(
+            "--smart_crop",
+            action="store_true",
+            help="use smart crop strategy that ensures all visible keypoints remain within output boundaries",
+        )
+        self.parser.add_argument(
             "--hm_gauss",
             type=float,
             default=0,

@@ -1,5 +1,4 @@
 
-rm -r exp/multi_pose/my_pose_experiment/*
 # python src/main.py multi_pose --dataset yolo_dataset \
 # --exp_id my_pose_experiment --num_epochs 140 \
 # --val_debug_batches 10 --val_intervals 10 \
@@ -38,10 +37,16 @@ python src/main.py multi_pose --dataset yolo_dataset \
   --yolo_std "1 1 1" \
   --input_rgb \
   --learn_invisible_kpts \
-  --learn_truncated_kpts \
   --keep_bbox_without_kpts \
   --no_color_aug \
-  --yolo_repeat_factor 5
+  --yolo_repeat_factor 5 \
+  --not_rand_crop --scale 0.15 --shift 0.05 \
+  --load_model exp/multi_pose/my_pose_experiment/model_last.pth
+  # --debug_aug_vis \
+  
+  
+  # --learn_truncated_kpts \
+  
   # --not_rand_crop 
   # --log_sample_details
   # --debug_aug_vis --num_workers 0

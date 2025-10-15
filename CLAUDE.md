@@ -263,3 +263,8 @@ By default, CenterNet only learns from visible keypoints (visibility > 0 in YOLO
 - Without flag: `if pts[j, 2] > 0:` - only process visible keypoints
 - With flag: `if kp_is_visible or learn_invisible:` - process all keypoints
 - Both visible and invisible keypoints get masks set to 1 and contribute to loss calculation
+- 对于可见的点或者启用learn_invisible的不可见点，都绘制heatmap
+                                if kp_is_visible or learn_invisible:
+                                    if j == 9:
+                                        draw_gaussian
+                                    draw_gaussian(hm_hp[j], pt_int, hp_radius)修改这里 绘制ct_int pt_int线段的点
