@@ -305,12 +305,10 @@ def evaluate_detection_metrics(detections, gt_entries, num_joints=0, iou_thresh=
         "vis_total_l2": vis_total_l2,
         "vis_total_count": vis_total_count,
         "vis_per_joint_sums": {
-            cat: (vis_per_joint_sums[cat] if vis_per_joint_sums[cat] is not None else [])
-            for cat in VIS_CATEGORIES
+            cat: (vis_per_joint_sums[cat] if vis_per_joint_sums[cat] is not None else []) for cat in VIS_CATEGORIES
         },
         "vis_per_joint_counts": {
-            cat: (vis_per_joint_counts[cat] if vis_per_joint_counts[cat] is not None else [])
-            for cat in VIS_CATEGORIES
+            cat: (vis_per_joint_counts[cat] if vis_per_joint_counts[cat] is not None else []) for cat in VIS_CATEGORIES
         },
         "vis_pred_correct": vis_pred_correct,
         "vis_pred_total": vis_pred_total,
@@ -590,6 +588,7 @@ def format_split_result(split, summary):
     )
 
 
+#  python test_case/eval_onnx_dataset.py --config test_case/onnx_infer.yaml   --dataset_root data/yolo_annotations/ --splits train val
 def main():
     default_config = os.path.join(_PROJECT_ROOT, "configs", "onnx_infer.yaml")
     parser = argparse.ArgumentParser(description="Evaluate ONNX model metrics on dataset splits")
